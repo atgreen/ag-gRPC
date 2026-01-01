@@ -18,7 +18,7 @@ ag-gRPC provides a complete gRPC client stack written entirely in portable Commo
 - **Generated client stubs** - type-safe RPC methods from service definitions
 - Full HPACK implementation including Huffman coding
 - HTTP/2 client with stream multiplexing and flow control
-- gRPC unary RPC calls
+- gRPC unary and **server streaming** RPC calls
 - Optional TLS/SSL support (via cl+ssl)
 - Interoperability tested against Go gRPC servers
 
@@ -122,6 +122,41 @@ Or use the CLI tool:
 (ag-grpc:channel-close *channel*)
 ```
 
+## Server Streaming
+
+ag-gRPC supports server streaming RPCs where the server sends multiple responses:
+
+```lisp
+;; Using generated stubs (recommended)
+(defvar *stream* (greeter-say-hello-stream *stub* request))
+
+;; Iterate over all messages
+(ag-grpc:do-stream-messages (reply *stream*)
+  (format t "Got: ~A~%" (message reply)))
+
+;; Check final status
+(ag-grpc:stream-status *stream*)
+;; => 0 (OK)
+```
+
+### Alternative streaming APIs
+
+```lisp
+;; Read messages one at a time
+(loop for msg = (ag-grpc:stream-read-message stream)
+      while msg
+      do (process msg))
+
+;; Collect all messages into a list
+(defvar *all-replies* (ag-grpc:stream-collect-all stream))
+
+;; Low-level API
+(defvar *stream* (ag-grpc:call-server-streaming channel
+                                                 "/hello.Greeter/ListFeatures"
+                                                 request
+                                                 :response-type 'feature))
+```
+
 ## TLS/SSL Support
 
 ag-gRPC supports optional TLS encryption via [cl+ssl](https://github.com/cl-plus-ssl/cl-plus-ssl).
@@ -191,6 +226,7 @@ gRPC protocol:
 - Metadata handling (headers and trailers)
 - Status codes per gRPC specification
 - Unary RPC calls
+- **Server streaming RPC** with iterator/callback support
 - Channel abstraction over HTTP/2 connections
 
 ## CLI Tool
@@ -256,7 +292,7 @@ Should work on other implementations supporting usocket.
 Current limitations (contributions welcome!):
 
 - Client-side only (no server implementation yet)
-- Unary RPCs only (no streaming)
+- Server streaming only (no client streaming or bidirectional yet)
 - No load balancing or service discovery
 - No deadline propagation
 

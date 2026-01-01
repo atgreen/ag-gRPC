@@ -41,10 +41,18 @@
     (t nil)))  ; Message types default to nil
 
 (defparameter *cl-reserved-names*
-  '("NUMBER" "VALUES" "TYPE" "CLASS" "FUNCTION" "STREAM" "STRING"
+  '(;; Types and special values
+    "NUMBER" "VALUES" "TYPE" "CLASS" "FUNCTION" "STREAM" "STRING"
     "LIST" "SEQUENCE" "ARRAY" "VECTOR" "SYMBOL" "PACKAGE" "CONS"
-    "FLOAT" "INTEGER" "RATIO" "COMPLEX" "CHARACTER" "PATHNAME" "HASH-TABLE")
-  "CL symbols that should not be used as accessor names")
+    "FLOAT" "INTEGER" "RATIO" "COMPLEX" "CHARACTER" "PATHNAME" "HASH-TABLE"
+    "T" "NIL"
+    ;; Common CL functions that would conflict with (SETF name)
+    "COUNT" "LENGTH" "POSITION" "MEMBER" "FIND" "REMOVE" "DELETE" "SORT"
+    "MAP" "REDUCE" "APPEND" "REVERSE" "SEARCH" "SUBSTITUTE" "REPLACE"
+    "FIRST" "SECOND" "THIRD" "REST" "LAST" "NTH" "ELT" "AREF"
+    "CAR" "CDR" "PUSH" "POP" "ERROR" "WARN" "FORMAT" "PRINT" "READ" "WRITE"
+    "OPEN" "CLOSE" "TIME" "SLEEP" "RANDOM")
+  "CL symbols that should not be used as accessor names (to avoid package lock violations)")
 
 (defun safe-accessor-name (name package)
   "Generate a safe accessor name, prefixing if it conflicts with CL symbols"
@@ -523,32 +531,49 @@ Returns the list of generated forms."
                           (format nil "/~A/~A" service-name method-name)))
          (client-streaming (proto-method-client-streaming method-desc))
          (server-streaming (proto-method-server-streaming method-desc)))
-    ;; For now, only generate unary RPCs (no streaming)
-    (if (or client-streaming server-streaming)
-        ;; Generate a placeholder for streaming methods
-        `(defmethod ,fn-name ((stub ,stub-class) request &key metadata timeout)
-           ,(format nil "Call ~A.~A RPC (streaming - not yet implemented)" service-name method-name)
-           (declare (ignore stub request metadata timeout))
-           (error "Streaming RPCs not yet implemented: ~A" ,method-path))
-        ;; Generate unary RPC method - use funcall with symbol lookup for ag-grpc dependency
-        `(defmethod ,fn-name ((stub ,stub-class) request &key metadata timeout)
-           ,(format nil "Call ~A.~A unary RPC" service-name method-name)
-           (let* ((grpc-pkg (find-package :ag-grpc))
-                  (call-fn (and grpc-pkg (symbol-function (find-symbol "CALL-UNARY" grpc-pkg))))
-                  (response-fn (and grpc-pkg (fdefinition (find-symbol "CALL-RESPONSE" grpc-pkg))))
-                  (status-fn (and grpc-pkg (fdefinition (find-symbol "CALL-STATUS" grpc-pkg)))))
-             (unless call-fn
-               (error "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
-             (let ((call (funcall call-fn
-                                  (stub-channel stub)
-                                  ,method-path
-                                  request
-                                  :response-type ',response-class
-                                  :metadata metadata
-                                  :timeout timeout)))
-               (values (funcall response-fn call)
-                       (funcall status-fn call)
-                       call)))))))
+    (cond
+      ;; Client streaming or bidirectional - not yet implemented
+      (client-streaming
+       `(defmethod ,fn-name ((stub ,stub-class) request &key metadata timeout)
+          ,(format nil "Call ~A.~A RPC (client streaming - not yet implemented)" service-name method-name)
+          (declare (ignore stub request metadata timeout))
+          (error "Client streaming RPCs not yet implemented: ~A" ,method-path)))
+      ;; Server streaming - returns a stream object
+      (server-streaming
+       `(defmethod ,fn-name ((stub ,stub-class) request &key metadata timeout)
+          ,(format nil "Call ~A.~A server streaming RPC.
+Returns a grpc-server-stream. Use stream-read-message or do-stream-messages to consume." service-name method-name)
+          (let* ((grpc-pkg (find-package :ag-grpc))
+                 (call-fn (and grpc-pkg (symbol-function (find-symbol "CALL-SERVER-STREAMING" grpc-pkg)))))
+            (unless call-fn
+              (error "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
+            (funcall call-fn
+                     (stub-channel stub)
+                     ,method-path
+                     request
+                     :response-type ',response-class
+                     :metadata metadata
+                     :timeout timeout))))
+      ;; Unary RPC
+      (t
+       `(defmethod ,fn-name ((stub ,stub-class) request &key metadata timeout)
+          ,(format nil "Call ~A.~A unary RPC" service-name method-name)
+          (let* ((grpc-pkg (find-package :ag-grpc))
+                 (call-fn (and grpc-pkg (symbol-function (find-symbol "CALL-UNARY" grpc-pkg))))
+                 (response-fn (and grpc-pkg (fdefinition (find-symbol "CALL-RESPONSE" grpc-pkg))))
+                 (status-fn (and grpc-pkg (fdefinition (find-symbol "CALL-STATUS" grpc-pkg)))))
+            (unless call-fn
+              (error "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
+            (let ((call (funcall call-fn
+                                 (stub-channel stub)
+                                 ,method-path
+                                 request
+                                 :response-type ',response-class
+                                 :metadata metadata
+                                 :timeout timeout)))
+              (values (funcall response-fn call)
+                      (funcall status-fn call)
+                      call))))))))
 
 (defun generate-service-code (service-desc proto-package package)
   "Generate all code for a service (stub class, constructor, methods)"

@@ -24,6 +24,7 @@ const (
 type HelloRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Count         int32                  `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"` // For streaming: how many replies to send
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -65,9 +66,17 @@ func (x *HelloRequest) GetName() string {
 	return ""
 }
 
+func (x *HelloRequest) GetCount() int32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
 type HelloReply struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Message       string                 `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
+	Index         int32                  `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"` // For streaming: which reply this is (0-indexed)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -109,18 +118,28 @@ func (x *HelloReply) GetMessage() string {
 	return ""
 }
 
+func (x *HelloReply) GetIndex() int32 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
 var File_hello_proto protoreflect.FileDescriptor
 
 const file_hello_proto_rawDesc = "" +
 	"\n" +
-	"\vhello.proto\x12\x05hello\"\"\n" +
+	"\vhello.proto\x12\x05hello\"8\n" +
 	"\fHelloRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\"&\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05count\x18\x02 \x01(\x05R\x05count\"<\n" +
 	"\n" +
 	"HelloReply\x12\x18\n" +
-	"\amessage\x18\x01 \x01(\tR\amessage2=\n" +
+	"\amessage\x18\x01 \x01(\tR\amessage\x12\x14\n" +
+	"\x05index\x18\x02 \x01(\x05R\x05index2y\n" +
 	"\aGreeter\x122\n" +
-	"\bSayHello\x12\x13.hello.HelloRequest\x1a\x11.hello.HelloReplyB\x14Z\x12hello-server/hellob\x06proto3"
+	"\bSayHello\x12\x13.hello.HelloRequest\x1a\x11.hello.HelloReply\x12:\n" +
+	"\x0eSayHelloStream\x12\x13.hello.HelloRequest\x1a\x11.hello.HelloReply0\x01B\x14Z\x12hello-server/hellob\x06proto3"
 
 var (
 	file_hello_proto_rawDescOnce sync.Once
@@ -141,9 +160,11 @@ var file_hello_proto_goTypes = []any{
 }
 var file_hello_proto_depIdxs = []int32{
 	0, // 0: hello.Greeter.SayHello:input_type -> hello.HelloRequest
-	1, // 1: hello.Greeter.SayHello:output_type -> hello.HelloReply
-	1, // [1:2] is the sub-list for method output_type
-	0, // [0:1] is the sub-list for method input_type
+	0, // 1: hello.Greeter.SayHelloStream:input_type -> hello.HelloRequest
+	1, // 2: hello.Greeter.SayHello:output_type -> hello.HelloReply
+	1, // 3: hello.Greeter.SayHelloStream:output_type -> hello.HelloReply
+	2, // [2:4] is the sub-list for method output_type
+	0, // [0:2] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name

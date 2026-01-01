@@ -29,41 +29,66 @@
                                                     (pathname-directory *load-truename*)))))
   (ag-proto:compile-proto-file hello-proto :load t))
 
-(format t "~&Running interop test...~%")
+(format t "~&Running interop tests...~%")
 
-;; Test the client
-(defun run-interop-test ()
+;; Test unary RPC
+(defun test-unary (channel)
+  (format t "~&~%=== Test 1: Unary RPC ===~%")
+  (let ((request (make-instance 'hellorequest :name "World")))
+    (format t "~&Sending HelloRequest with name='World'...~%")
+    (let ((call (ag-grpc:call-unary channel
+                                    "/hello.Greeter/SayHello"
+                                    request
+                                    :response-type 'helloreply)))
+      (format t "~&Response received!~%")
+      (format t "~&  Status: ~A~%" (ag-grpc:call-status call))
+      (format t "~&  Message: ~A~%" (message (ag-grpc:call-response call)))
+      (eql (ag-grpc:call-status call) ag-grpc:+grpc-status-ok+))))
+
+;; Test server streaming RPC
+(defun test-server-streaming (channel)
+  (format t "~&~%=== Test 2: Server Streaming RPC ===~%")
+  (let ((request (make-instance 'hellorequest :name "Stream" :count 3)))
+    (format t "~&Sending HelloRequest with name='Stream', count=3...~%")
+    (let* ((stream (ag-grpc:call-server-streaming channel
+                                                   "/hello.Greeter/SayHelloStream"
+                                                   request
+                                                   :response-type 'helloreply))
+           (message-count 0))
+      ;; Read all messages from the stream
+      (ag-grpc:do-stream-messages (reply stream)
+        (incf message-count)
+        (format t "~&  [~A] ~A~%" (index reply) (message reply)))
+      (format t "~&Stream finished. Status: ~A~%" (ag-grpc:stream-status stream))
+      (format t "~&Total messages received: ~A~%" message-count)
+      (and (eql (ag-grpc:stream-status stream) ag-grpc:+grpc-status-ok+)
+           (= message-count 3)))))
+
+;; Run all tests
+(defun run-interop-tests ()
   (handler-case
-      (let* (;; Create a channel to the server
-             (channel (ag-grpc:make-channel "localhost" 50051))
-             ;; Create the request message
-             (request (make-instance 'hellorequest :name "World")))
-
-        (format t "~&Sending HelloRequest with name='World'...~%")
-
-        ;; Make the RPC call
-        (let ((call (ag-grpc:call-unary channel
-                                        "/hello.Greeter/SayHello"
-                                        request
-                                        :response-type 'helloreply)))
-          (format t "~&Response received!~%")
-          (format t "~&  Status: ~A~%" (ag-grpc:call-status call))
-          (format t "~&  Message: ~A~%" (message (ag-grpc:call-response call)))
-
-          ;; Close the channel
-          (ag-grpc:channel-close channel)
-
-          ;; Return success
-          (if (eql (ag-grpc:call-status call) ag-grpc:+grpc-status-ok+)
-              (progn
-                (format t "~&~%SUCCESS: Interop test passed!~%")
-                t)
-              (progn
-                (format t "~&~%FAILED: Call returned non-OK status~%")
-                nil))))
+      (let ((channel (ag-grpc:make-channel "localhost" 50051))
+            (all-passed t))
+        (unwind-protect
+             (progn
+               ;; Test 1: Unary RPC
+               (unless (test-unary channel)
+                 (setf all-passed nil))
+               ;; Test 2: Server Streaming RPC
+               (unless (test-server-streaming channel)
+                 (setf all-passed nil)))
+          ;; Clean up
+          (ag-grpc:channel-close channel))
+        (if all-passed
+            (progn
+              (format t "~&~%SUCCESS: All interop tests passed!~%")
+              t)
+            (progn
+              (format t "~&~%FAILED: Some tests failed~%")
+              nil)))
     (error (e)
       (format t "~&~%ERROR: ~A~%" e)
       nil)))
 
-(let ((result (run-interop-test)))
+(let ((result (run-interop-tests)))
   (sb-ext:exit :code (if result 0 1)))

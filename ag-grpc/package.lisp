@@ -43,13 +43,22 @@
    #:channel-close
    #:channel-tls-p
 
-   ;; Call
+   ;; Call (unary)
    #:grpc-call
    #:call-unary
    #:call-response
    #:call-status
    #:call-rpc-method
    #:call-request-metadata
+
+   ;; Server streaming
+   #:grpc-server-stream
+   #:call-server-streaming
+   #:stream-read-message
+   #:stream-finished-p
+   #:stream-status
+   #:stream-collect-all
+   #:do-stream-messages
 
    ;; Conditions
    #:grpc-error
