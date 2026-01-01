@@ -134,18 +134,34 @@ Convenience function equivalent to (make-channel ... :tls t)."
     (ag-http2::stream-headers stream)))
 
 (defun channel-receive-message (channel stream-id)
-  "Receive a message from a stream"
+  "Receive a message from a stream.
+Handles messages that span multiple HTTP/2 DATA frames."
   (let* ((conn (channel-connection channel))
          (stream (ag-http2::multiplexer-get-stream
                   (ag-http2::connection-multiplexer conn)
                   stream-id)))
-    ;; Read frames until we have data and stream is half-closed or closed
-    (loop while (and (zerop (length (ag-http2::stream-data-buffer stream)))
-                     (ag-http2::stream-can-recv-p stream))
-          do (ag-http2:connection-read-frame conn))
-    (let ((data (ag-http2::stream-consume-data stream)))
-      (when (plusp (length data))
-        (decode-grpc-message data)))))
+    ;; Keep reading until we have a complete gRPC message or stream closes
+    (loop
+      ;; Try to decode from current buffer (non-destructively peek first)
+      (let* ((buffer (ag-http2::stream-data-buffer stream))
+             (result (decode-grpc-message buffer 0)))
+        (when result
+          ;; Got a complete message - consume exactly what we decoded
+          (multiple-value-bind (data compressed consumed)
+              (decode-grpc-message buffer 0)
+            (declare (ignore compressed))
+            ;; Remove consumed bytes from buffer
+            (let ((remaining (subseq buffer consumed)))
+              (setf (fill-pointer buffer) 0)
+              (loop for byte across remaining
+                    do (vector-push-extend byte buffer)))
+            (return data))))
+      ;; Need more data - check if stream can receive more
+      (unless (ag-http2::stream-can-recv-p stream)
+        ;; Stream closed without complete message
+        (return nil))
+      ;; Read another frame
+      (ag-http2:connection-read-frame conn))))
 
 (defun channel-receive-trailers (channel stream-id)
   "Receive trailers from a stream (contains gRPC status)"

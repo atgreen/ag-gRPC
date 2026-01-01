@@ -90,14 +90,16 @@
 
 ;;; Serialization code generation
 
-(defun generate-field-serializer (field)
-  "Generate serialization code for a field"
+(defun generate-field-serializer (field &optional oneofs)
+  "Generate serialization code for a field.
+ONEOFS is the list of oneof descriptors for the message."
   (let* ((name (proto-field-name field))
          (slot-name (field-name-to-slot-name name))
          (field-num (proto-field-number field))
          (type (proto-field-type field))
          (wire-type (proto-type-wire-type type))
-         (repeated-p (eq (proto-field-label field) :repeated)))
+         (repeated-p (eq (proto-field-label field) :repeated))
+         (oneof-index (proto-field-oneof-index field)))
     (if repeated-p
         ;; Repeated field - serialize each element
         `(dolist (elem (slot-value obj ',slot-name))
@@ -105,10 +107,24 @@
            ,(generate-value-serializer 'elem type 'buffer))
         ;; Singular field - only serialize if non-default
         (let ((default (proto3-default-value type)))
-          `(let ((value (slot-value obj ',slot-name)))
-             (when ,(generate-non-default-check 'value type default)
-               (write-field-tag ,field-num ,wire-type buffer)
-               ,(generate-value-serializer 'value type 'buffer)))))))
+          (if oneof-index
+              ;; Oneof field - only serialize if this variant is active
+              (let* ((oneof (when oneofs (nth oneof-index oneofs)))
+                     (oneof-name (when oneof (proto-oneof-name oneof)))
+                     (case-slot (when oneof-name
+                                  (intern (format nil "~A-CASE"
+                                                  (string-upcase (substitute #\- #\_ oneof-name))))))
+                     (field-keyword (field-name-to-keyword name)))
+                `(when (eq (slot-value obj ',case-slot) ,field-keyword)
+                   (let ((value (slot-value obj ',slot-name)))
+                     (when ,(generate-non-default-check 'value type default)
+                       (write-field-tag ,field-num ,wire-type buffer)
+                       ,(generate-value-serializer 'value type 'buffer)))))
+              ;; Regular field
+              `(let ((value (slot-value obj ',slot-name)))
+                 (when ,(generate-non-default-check 'value type default)
+                   (write-field-tag ,field-num ,wire-type buffer)
+                   ,(generate-value-serializer 'value type 'buffer))))))))
 
 (defun generate-non-default-check (var type default)
   "Generate code to check if a value is non-default"
@@ -160,19 +176,44 @@
 
 ;;; Deserialization code generation
 
-(defun generate-field-deserializer-case (field class-name)
-  "Generate a case clause for deserializing a field"
+(defun generate-field-deserializer-case (field class-name &optional oneofs)
+  "Generate a case clause for deserializing a field.
+ONEOFS is the list of oneof descriptors for the message."
   (let* ((name (proto-field-name field))
          (slot-name (field-name-to-slot-name name))
          (field-num (proto-field-number field))
          (type (proto-field-type field))
-         (repeated-p (eq (proto-field-label field) :repeated)))
+         (repeated-p (eq (proto-field-label field) :repeated))
+         (oneof-index (proto-field-oneof-index field)))
     `(,field-num
       ,(if repeated-p
            `(push ,(generate-value-deserializer type 'buffer 'wire-type)
                   (slot-value obj ',slot-name))
-           `(setf (slot-value obj ',slot-name)
-                  ,(generate-value-deserializer type 'buffer 'wire-type))))))
+           (if oneof-index
+               ;; Oneof field: clear other fields and set the case slot
+               (let* ((oneof (nth oneof-index oneofs))
+                      (oneof-name (when oneof (proto-oneof-name oneof)))
+                      (case-slot (when oneof-name
+                                   (intern (format nil "~A-CASE"
+                                                   (string-upcase (substitute #\- #\_ oneof-name))))))
+                      (field-keyword (field-name-to-keyword name))
+                      (other-fields (when oneof
+                                      (remove field (proto-oneof-fields oneof)))))
+                 `(progn
+                    ;; Clear other fields in this oneof
+                    ,@(mapcar (lambda (f)
+                                `(setf (slot-value obj ',(field-name-to-slot-name (proto-field-name f)))
+                                       ,(proto3-default-value (proto-field-type f))))
+                              other-fields)
+                    ;; Set this field
+                    (setf (slot-value obj ',slot-name)
+                          ,(generate-value-deserializer type 'buffer 'wire-type))
+                    ;; Update case slot
+                    ,@(when case-slot
+                        `((setf (slot-value obj ',case-slot) ,field-keyword)))))
+               ;; Regular field
+               `(setf (slot-value obj ',slot-name)
+                      ,(generate-value-deserializer type 'buffer 'wire-type)))))))
 
 (defun generate-value-deserializer (type buffer-var wire-type-var)
   "Generate code to deserialize a value of the given type"
@@ -345,17 +386,34 @@
   (let* ((name (proto-message-name message-desc))
          (class-name (intern (string-upcase name) package))
          (fields (proto-message-fields message-desc))
-         (slots (mapcar (lambda (f) (generate-slot-definition f package)) fields)))
+         (oneofs (proto-message-oneofs message-desc))
+         (field-slots (mapcar (lambda (f) (generate-slot-definition f package)) fields))
+         ;; Generate a case slot for each oneof to track which variant is set
+         (oneof-case-slots (mapcar (lambda (o) (generate-oneof-case-slot o package)) oneofs))
+         (all-slots (append field-slots oneof-case-slots)))
     `(defclass ,class-name (proto-message)
-       ,slots
+       ,all-slots
        (:documentation ,(format nil "Proto message: ~A" name)))))
+
+(defun generate-oneof-case-slot (oneof-desc &optional package)
+  "Generate a slot to track which oneof variant is currently set"
+  (let* ((name (proto-oneof-name oneof-desc))
+         (slot-name (intern (format nil "~A-CASE" (string-upcase (substitute #\- #\_ name))) package))
+         (accessor-name (if package
+                            (intern (format nil "~A-CASE" (string-upcase (substitute #\- #\_ name))) package)
+                            slot-name)))
+    `(,slot-name
+      :initform nil
+      :accessor ,accessor-name
+      :documentation ,(format nil "Which ~A variant is set (field name keyword or nil)" name))))
 
 (defun generate-serializer (message-desc &optional package)
   "Generate a serialize-to-bytes method for a message"
   (let* ((name (proto-message-name message-desc))
          (class-name (intern (string-upcase name) package))
          (fields (proto-message-fields message-desc))
-         (field-serializers (mapcar #'generate-field-serializer fields)))
+         (oneofs (proto-message-oneofs message-desc))
+         (field-serializers (mapcar (lambda (f) (generate-field-serializer f oneofs)) fields)))
     `(defmethod serialize-to-bytes ((obj ,class-name))
        (let ((buffer (make-array 64 :element-type '(unsigned-byte 8)
                                     :fill-pointer 0 :adjustable t)))
@@ -367,7 +425,8 @@
   (let* ((name (proto-message-name message-desc))
          (class-name (intern (string-upcase name) package))
          (fields (proto-message-fields message-desc))
-         (field-cases (mapcar (lambda (f) (generate-field-deserializer-case f class-name))
+         (oneofs (proto-message-oneofs message-desc))
+         (field-cases (mapcar (lambda (f) (generate-field-deserializer-case f class-name oneofs))
                               fields))
          ;; Reverse repeated fields at the end
          (repeated-fields (remove-if-not (lambda (f) (eq (proto-field-label f) :repeated))

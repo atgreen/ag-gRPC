@@ -3,6 +3,44 @@
 (in-package #:ag-http2)
 
 ;;;; ========================================================================
+;;;; Error Codes (RFC 7540 Section 7)
+;;;; ========================================================================
+
+(defconstant +error-no-error+ #x0)
+(defconstant +error-protocol-error+ #x1)
+(defconstant +error-internal-error+ #x2)
+(defconstant +error-flow-control-error+ #x3)
+(defconstant +error-settings-timeout+ #x4)
+(defconstant +error-stream-closed+ #x5)
+(defconstant +error-frame-size-error+ #x6)
+(defconstant +error-refused-stream+ #x7)
+(defconstant +error-cancel+ #x8)
+(defconstant +error-compression-error+ #x9)
+(defconstant +error-connect-error+ #xa)
+(defconstant +error-enhance-your-calm+ #xb)
+(defconstant +error-inadequate-security+ #xc)
+(defconstant +error-http-1-1-required+ #xd)
+
+(defun error-code-name (code)
+  "Return the name of an error code"
+  (case code
+    (#.+error-no-error+ "NO_ERROR")
+    (#.+error-protocol-error+ "PROTOCOL_ERROR")
+    (#.+error-internal-error+ "INTERNAL_ERROR")
+    (#.+error-flow-control-error+ "FLOW_CONTROL_ERROR")
+    (#.+error-settings-timeout+ "SETTINGS_TIMEOUT")
+    (#.+error-stream-closed+ "STREAM_CLOSED")
+    (#.+error-frame-size-error+ "FRAME_SIZE_ERROR")
+    (#.+error-refused-stream+ "REFUSED_STREAM")
+    (#.+error-cancel+ "CANCEL")
+    (#.+error-compression-error+ "COMPRESSION_ERROR")
+    (#.+error-connect-error+ "CONNECT_ERROR")
+    (#.+error-enhance-your-calm+ "ENHANCE_YOUR_CALM")
+    (#.+error-inadequate-security+ "INADEQUATE_SECURITY")
+    (#.+error-http-1-1-required+ "HTTP_1_1_REQUIRED")
+    (t (format nil "UNKNOWN_ERROR_~A" code))))
+
+;;;; ========================================================================
 ;;;; Flow Control Constants
 ;;;; ========================================================================
 
@@ -60,41 +98,3 @@
   (let ((delta (- new-initial-size (window-initial-size window))))
     (setf (window-initial-size window) new-initial-size)
     (window-increment window delta)))
-
-;;;; ========================================================================
-;;;; Error Codes (RFC 7540 Section 7)
-;;;; ========================================================================
-
-(defconstant +error-no-error+ #x0)
-(defconstant +error-protocol-error+ #x1)
-(defconstant +error-internal-error+ #x2)
-(defconstant +error-flow-control-error+ #x3)
-(defconstant +error-settings-timeout+ #x4)
-(defconstant +error-stream-closed+ #x5)
-(defconstant +error-frame-size-error+ #x6)
-(defconstant +error-refused-stream+ #x7)
-(defconstant +error-cancel+ #x8)
-(defconstant +error-compression-error+ #x9)
-(defconstant +error-connect-error+ #xa)
-(defconstant +error-enhance-your-calm+ #xb)
-(defconstant +error-inadequate-security+ #xc)
-(defconstant +error-http-1-1-required+ #xd)
-
-(defun error-code-name (code)
-  "Return the name of an error code"
-  (case code
-    (#.+error-no-error+ "NO_ERROR")
-    (#.+error-protocol-error+ "PROTOCOL_ERROR")
-    (#.+error-internal-error+ "INTERNAL_ERROR")
-    (#.+error-flow-control-error+ "FLOW_CONTROL_ERROR")
-    (#.+error-settings-timeout+ "SETTINGS_TIMEOUT")
-    (#.+error-stream-closed+ "STREAM_CLOSED")
-    (#.+error-frame-size-error+ "FRAME_SIZE_ERROR")
-    (#.+error-refused-stream+ "REFUSED_STREAM")
-    (#.+error-cancel+ "CANCEL")
-    (#.+error-compression-error+ "COMPRESSION_ERROR")
-    (#.+error-connect-error+ "CONNECT_ERROR")
-    (#.+error-enhance-your-calm+ "ENHANCE_YOUR_CALM")
-    (#.+error-inadequate-security+ "INADEQUATE_SECURITY")
-    (#.+error-http-1-1-required+ "HTTP_1_1_REQUIRED")
-    (t (format nil "UNKNOWN_ERROR_~A" code))))

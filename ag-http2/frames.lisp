@@ -140,10 +140,23 @@
     ;; Payload
     (write-sequence payload stream)))
 
+(defun read-full-sequence (buffer stream)
+  "Read exactly (length buffer) bytes from stream.
+Handles partial reads by retrying until complete or EOF."
+  (let ((total 0)
+        (len (length buffer)))
+    (loop while (< total len)
+          for read = (read-sequence buffer stream :start total)
+          do (if (= read total)
+                 ;; No progress - EOF or error
+                 (return total)
+                 (setf total read)))
+    total))
+
 (defun read-frame (stream)
   "Read an HTTP/2 frame from a binary stream"
   (let ((header (make-array 9 :element-type '(unsigned-byte 8))))
-    (when (/= 9 (read-sequence header stream))
+    (when (/= 9 (read-full-sequence header stream))
       (return-from read-frame nil))
     (let* ((length (logior (ash (aref header 0) 16)
                            (ash (aref header 1) 8)
@@ -156,7 +169,8 @@
                               (aref header 8)))
            (payload (make-array length :element-type '(unsigned-byte 8))))
       (when (plusp length)
-        (read-sequence payload stream))
+        (when (/= length (read-full-sequence payload stream))
+          (error 'http2-frame-error :message "Incomplete frame payload")))
       (make-frame-from-raw type flags stream-id payload))))
 
 (defun make-frame-from-raw (type flags stream-id payload)

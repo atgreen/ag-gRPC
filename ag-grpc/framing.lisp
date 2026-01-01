@@ -10,6 +10,13 @@
 ;;;; - 4 bytes: Message length (big-endian)
 ;;;; - N bytes: Message data
 ;;;;
+;;;; COMPRESSION STATUS:
+;;;; This implementation does NOT currently support message compression.
+;;;; The grpc-encoding header is set to "identity" (no compression).
+;;;; If a peer sends a compressed message (compressed flag = 1), an error
+;;;; is signaled. To add compression support, implement decompress-grpc-message
+;;;; and compress-grpc-message for gzip/deflate algorithms.
+;;;;
 ;;;; Reference: https://grpc.io/docs/what-is-grpc/core-concepts/#length-prefixed-message-framing
 ;;;; ========================================================================
 
@@ -53,7 +60,8 @@ Returns a byte vector with the gRPC frame header prepended."
 
 (defun decode-grpc-message (bytes &optional (start 0))
   "Decode a gRPC message frame from bytes.
-Returns (values message-data compressed-p bytes-consumed) or NIL if incomplete."
+Returns (values message-data compressed-p bytes-consumed) or NIL if incomplete.
+Note: Compressed messages are not currently supported and will signal an error."
   (let ((available (- (length bytes) start)))
     (when (< available +grpc-frame-header-size+)
       (return-from decode-grpc-message nil))
@@ -65,6 +73,10 @@ Returns (values message-data compressed-p bytes-consumed) or NIL if incomplete."
            (total-size (+ +grpc-frame-header-size+ length)))
       (when (< available total-size)
         (return-from decode-grpc-message nil))
+      ;; Error on compressed messages since we don't support decompression
+      (when compressed-p
+        (error 'grpc-error
+               :message "Received compressed message but compression is not supported. Ensure peer uses grpc-encoding: identity"))
       (let ((data (subseq bytes
                           (+ start +grpc-frame-header-size+)
                           (+ start total-size))))
@@ -72,7 +84,8 @@ Returns (values message-data compressed-p bytes-consumed) or NIL if incomplete."
 
 (defun decode-grpc-message-from-stream (stream)
   "Read and decode a gRPC message from a stream.
-Returns (values message-data compressed-p) or NIL on EOF."
+Returns (values message-data compressed-p) or NIL on EOF.
+Note: Compressed messages are not currently supported and will signal an error."
   (let ((header (make-array +grpc-frame-header-size+
                             :element-type '(unsigned-byte 8))))
     (when (< (read-sequence header stream) +grpc-frame-header-size+)
@@ -83,6 +96,10 @@ Returns (values message-data compressed-p) or NIL on EOF."
                            (ash (aref header 3) 8)
                            (aref header 4)))
            (data (make-array length :element-type '(unsigned-byte 8))))
+      ;; Error on compressed messages since we don't support decompression
+      (when compressed-p
+        (error 'grpc-error
+               :message "Received compressed message but compression is not supported. Ensure peer uses grpc-encoding: identity"))
       (when (< (read-sequence data stream) length)
         (error 'grpc-error :message "Incomplete gRPC message"))
       (values data compressed-p))))

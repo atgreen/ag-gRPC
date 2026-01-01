@@ -81,6 +81,20 @@
   "Decode base64-encoded binary metadata"
   (base64-decode string))
 
+(defun decode-metadata-headers (headers)
+  "Decode metadata from HTTP/2 headers, auto-decoding -bin keys.
+Returns an alist with binary values decoded."
+  (loop for (key . value) in headers
+        ;; Skip pseudo-headers and standard gRPC headers
+        unless (or (and (keywordp key) (member key '(:status :method :scheme :path :authority)))
+                   (member key '("content-type" "te" "user-agent" "grpc-encoding"
+                                 "grpc-accept-encoding" "grpc-timeout" "grpc-status"
+                                 "grpc-message")
+                           :test #'string-equal))
+        collect (if (and (stringp key) (binary-metadata-key-p key))
+                    (cons key (decode-binary-metadata value))
+                    (cons key value))))
+
 ;;; Simple base64 implementation for metadata encoding
 
 (defparameter *base64-chars*
@@ -171,7 +185,13 @@
                             (list (cons "grpc-timeout" (format-grpc-timeout timeout))))))
     (when metadata
       (dolist (entry (metadata-entries metadata))
-        (setf headers (append headers (list entry)))))
+        (let ((key (car entry))
+              (value (cdr entry)))
+          ;; Binary metadata keys (ending in -bin) must be base64 encoded
+          (if (binary-metadata-key-p key)
+              (setf headers (append headers
+                                    (list (cons key (encode-binary-metadata value)))))
+              (setf headers (append headers (list entry)))))))
     headers))
 
 (defun make-response-headers (&key metadata)
@@ -180,7 +200,12 @@
                        (cons "content-type" *grpc-content-type*))))
     (when metadata
       (dolist (entry (metadata-entries metadata))
-        (push entry headers)))
+        (let ((key (car entry))
+              (value (cdr entry)))
+          ;; Binary metadata keys (ending in -bin) must be base64 encoded
+          (if (binary-metadata-key-p key)
+              (push (cons key (encode-binary-metadata value)) headers)
+              (push entry headers)))))
     headers))
 
 (defun make-trailers (status &key message metadata)
@@ -190,7 +215,12 @@
       (push (cons "grpc-message" (percent-encode message)) trailers))
     (when metadata
       (dolist (entry (metadata-entries metadata))
-        (push entry trailers)))
+        (let ((key (car entry))
+              (value (cdr entry)))
+          ;; Binary metadata keys (ending in -bin) must be base64 encoded
+          (if (binary-metadata-key-p key)
+              (push (cons key (encode-binary-metadata value)) trailers)
+              (push entry trailers)))))
     (nreverse trailers)))
 
 ;;;; ========================================================================

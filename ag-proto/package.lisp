@@ -113,6 +113,15 @@
    #:proto-method-server-streaming
    #:proto-method-options
 
+   ;; Oneof descriptor
+   #:proto-oneof-descriptor
+   #:proto-oneof-name
+   #:proto-oneof-index
+   #:proto-oneof-fields
+
+   ;; Field oneof accessors
+   #:proto-field-oneof-index
+
    ;; Parser
    #:parse-proto-file
    #:parse-proto-string

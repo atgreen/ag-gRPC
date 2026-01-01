@@ -23,6 +23,10 @@
   ((stream-id :initarg :stream-id :reader http2-stream-error-stream-id))
   (:documentation "Error that affects a single stream"))
 
+(define-condition http2-frame-error (http2-error)
+  ()
+  (:documentation "Error during frame parsing (incomplete or malformed frame)"))
+
 ;;;; ========================================================================
 ;;;; HTTP/2 Connection
 ;;;; ========================================================================
@@ -50,7 +54,13 @@
                   :accessor connection-remote-window)
    (state :initform :connecting :accessor connection-state
           :documentation "Connection state: :connecting, :open, :closing, :closed")
-   (last-stream-id :initform 0 :accessor connection-last-stream-id))
+   (last-stream-id :initform 0 :accessor connection-last-stream-id)
+   (pending-header-block :initform nil :accessor connection-pending-header-block
+                         :documentation "Buffered header block fragments awaiting CONTINUATION")
+   (pending-header-stream-id :initform nil :accessor connection-pending-header-stream-id
+                              :documentation "Stream ID for pending header block")
+   (pending-header-end-stream :initform nil :accessor connection-pending-header-end-stream
+                               :documentation "END_STREAM flag from initial HEADERS frame"))
   (:documentation "HTTP/2 connection"))
 
 (defun make-client-connection (host port &key tls (verify nil))
@@ -142,13 +152,45 @@
         (stream-transition stream :send-end-stream)))))
 
 (defun connection-send-data (conn stream-id data &key end-stream)
-  "Send data on a stream"
-  (let ((frame (make-data-frame stream-id data :end-stream end-stream)))
-    (write-frame frame (connection-stream conn))
-    (force-output (connection-stream conn))
-    (when end-stream
-      (let ((stream (multiplexer-get-stream (connection-multiplexer conn) stream-id)))
-        (stream-transition stream :send-end-stream)))))
+  "Send data on a stream.
+Respects MAX_FRAME_SIZE and flow control windows, fragmenting if needed."
+  (let* ((max-frame-size (or (cdr (assoc +settings-max-frame-size+
+                                          (connection-remote-settings conn)))
+                             16384))  ; Default per RFC 7540
+         (h2-stream (multiplexer-get-stream (connection-multiplexer conn) stream-id))
+         (data-length (length data))
+         (offset 0))
+    ;; Send data in chunks respecting max frame size and flow control
+    (loop while (< offset data-length)
+          do (let* ((remaining (- data-length offset))
+                    ;; Respect max frame size
+                    (chunk-size (min remaining max-frame-size))
+                    ;; Respect connection flow control window
+                    (chunk-size (min chunk-size (window-size (connection-remote-window conn))))
+                    ;; Respect stream flow control window
+                    (chunk-size (min chunk-size (stream-remote-window h2-stream))))
+               (if (zerop chunk-size)
+                   ;; Flow control blocked - wait for WINDOW_UPDATE
+                   (connection-read-frame conn)
+                   ;; Send a chunk
+                   (let* ((chunk (subseq data offset (+ offset chunk-size)))
+                          (is-last (and end-stream (= (+ offset chunk-size) data-length)))
+                          (frame (make-data-frame stream-id chunk :end-stream is-last)))
+                     ;; Consume from flow control windows
+                     (window-consume (connection-remote-window conn) chunk-size)
+                     (decf (stream-remote-window h2-stream) chunk-size)
+                     ;; Send the frame
+                     (write-frame frame (connection-stream conn))
+                     (force-output (connection-stream conn))
+                     (incf offset chunk-size)
+                     (when is-last
+                       (stream-transition h2-stream :send-end-stream))))))
+    ;; Handle case where data was empty but end-stream is requested
+    (when (and end-stream (zerop data-length))
+      (let ((frame (make-data-frame stream-id data :end-stream t)))
+        (write-frame frame (connection-stream conn))
+        (force-output (connection-stream conn))
+        (stream-transition h2-stream :send-end-stream)))))
 
 ;;;; ========================================================================
 ;;;; Receiving Frames
@@ -188,16 +230,82 @@
     (headers-frame
      (let* ((stream-id (frame-stream-id frame))
             (stream (multiplexer-get-stream (connection-multiplexer conn) stream-id))
-            (decoder (connection-hpack-decoder conn))
-            (headers (hpack-decode decoder (frame-payload frame))))
-       (stream-transition stream :recv-headers)
-       (setf (stream-headers stream) headers)
-       (when (plusp (logand (frame-flags frame) +flag-end-stream+))
-         (stream-transition stream :recv-end-stream))))
+            (end-headers-p (plusp (logand (frame-flags frame) +flag-end-headers+)))
+            (end-stream-p (plusp (logand (frame-flags frame) +flag-end-stream+))))
+       ;; Reject HEADERS if we're already expecting CONTINUATION
+       (when (connection-pending-header-block conn)
+         (error 'http2-connection-error
+                :message "Received HEADERS while awaiting CONTINUATION"
+                :error-code +error-protocol-error+))
+       (if end-headers-p
+           ;; Complete header block - decode immediately
+           (let* ((decoder (connection-hpack-decoder conn))
+                  (headers (hpack-decode decoder (frame-payload frame))))
+             (stream-transition stream :recv-headers)
+             (if (stream-headers stream)
+                 (setf (stream-trailers stream) headers)
+                 (setf (stream-headers stream) headers))
+             (when end-stream-p
+               (stream-transition stream :recv-end-stream)))
+           ;; Incomplete - buffer and wait for CONTINUATION
+           (progn
+             (setf (connection-pending-header-block conn)
+                   (copy-seq (frame-payload frame)))
+             (setf (connection-pending-header-stream-id conn) stream-id)
+             (setf (connection-pending-header-end-stream conn) end-stream-p)))))
+    (continuation-frame
+     (let* ((stream-id (frame-stream-id frame))
+            (pending-block (connection-pending-header-block conn))
+            (end-headers-p (plusp (logand (frame-flags frame) +flag-end-headers+))))
+       ;; Verify stream-id matches pending block
+       (unless (and pending-block
+                    (= stream-id (connection-pending-header-stream-id conn)))
+         (error 'http2-connection-error
+                :message "Unexpected CONTINUATION frame"
+                :error-code +error-protocol-error+))
+       ;; Append to pending block
+       (let ((new-block (make-array (+ (length pending-block)
+                                        (length (frame-payload frame)))
+                                     :element-type '(unsigned-byte 8))))
+         (replace new-block pending-block)
+         (replace new-block (frame-payload frame) :start1 (length pending-block))
+         (if end-headers-p
+             ;; Complete - decode and clear pending
+             (let* ((stream (multiplexer-get-stream (connection-multiplexer conn) stream-id))
+                    (decoder (connection-hpack-decoder conn))
+                    (headers (hpack-decode decoder new-block))
+                    (end-stream-p (connection-pending-header-end-stream conn)))
+               (stream-transition stream :recv-headers)
+               (if (stream-headers stream)
+                   (setf (stream-trailers stream) headers)
+                   (setf (stream-headers stream) headers))
+               ;; Apply END_STREAM from original HEADERS frame
+               (when end-stream-p
+                 (stream-transition stream :recv-end-stream))
+               ;; Clear pending state
+               (setf (connection-pending-header-block conn) nil)
+               (setf (connection-pending-header-stream-id conn) nil)
+               (setf (connection-pending-header-end-stream conn) nil))
+             ;; Still incomplete - update pending block
+             (setf (connection-pending-header-block conn) new-block)))))
     (data-frame
      (let* ((stream-id (frame-stream-id frame))
-            (stream (multiplexer-get-stream (connection-multiplexer conn) stream-id)))
+            (stream (multiplexer-get-stream (connection-multiplexer conn) stream-id))
+            (data-length (length (frame-payload frame))))
        (stream-append-data stream (frame-payload frame))
+       ;; Update local flow control windows and send WINDOW_UPDATE
+       (when (plusp data-length)
+         ;; Consume from local windows
+         (decf (window-size (connection-local-window conn)) data-length)
+         (decf (stream-local-window stream) data-length)
+         ;; Send WINDOW_UPDATE to replenish connection window
+         (write-frame (make-window-update-frame 0 data-length) (connection-stream conn))
+         ;; Send WINDOW_UPDATE to replenish stream window
+         (write-frame (make-window-update-frame stream-id data-length) (connection-stream conn))
+         (force-output (connection-stream conn))
+         ;; Restore local windows
+         (incf (window-size (connection-local-window conn)) data-length)
+         (incf (stream-local-window stream) data-length))
        (when (plusp (logand (frame-flags frame) +flag-end-stream+))
          (stream-transition stream :recv-end-stream))))
     (rst-stream-frame

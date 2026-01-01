@@ -2,11 +2,10 @@
 ;;;
 ;;; SPDX-License-Identifier: MIT
 ;;;
-;;; Copyright (C) 2026 Your Name
+;;; Copyright (C) 2024  Anthony Green <green@moxielogic.com>
 
-(in-package #:cl-gRPC)
+(in-package #:cl-grpc)
 
 (defun main ()
   "Entry point for the application."
-  (format t "Hello, world!~%"))
-world!~%"))
+  (format t "ag-gRPC ~A~%" ag-grpc:+version+))

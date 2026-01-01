@@ -22,3 +22,7 @@ interop/go-server/hello-server
 # IDE
 .vscode/
 .idea/
+
+# Review documentation
+REVIEW.md
+RESPONSE.md

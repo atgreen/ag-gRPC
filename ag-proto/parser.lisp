@@ -399,12 +399,65 @@
                    :server-streaming server-streaming)))
 
 (defun transform-oneof (node msg-desc)
-  "Transform a oneof parse node"
-  (declare (ignore msg-desc))
-  (let ((name (find-name-in-node node)))
-    ;; Return the oneof name for now
-    ;; TODO: properly handle oneof fields
-    name))
+  "Transform a oneof parse node into a proto-oneof-descriptor.
+Also adds the oneof's fields to the message with oneof-index set."
+  (let* ((name (find-oneof-name node))
+         ;; Oneof index is the current count of oneofs in the message
+         (oneof-index (length (proto-message-oneofs msg-desc)))
+         (oneof-desc (make-instance 'proto-oneof-descriptor
+                                    :name name
+                                    :index oneof-index))
+         (fields nil))
+    ;; Parse each oneofField in the oneof body
+    (dolist (child (cdr node))
+      (when (and (consp child) (eq (car child) :oneofField))
+        (let ((field (transform-oneof-field child oneof-index)))
+          (push field fields)
+          ;; Also add to message's fields list for serialization
+          (push field (proto-message-fields msg-desc)))))
+    (setf (proto-oneof-fields oneof-desc) (nreverse fields))
+    oneof-desc))
+
+(defun find-oneof-name (node)
+  "Find the name in a oneof node"
+  (dolist (child (cdr node))
+    (cond
+      ((stringp child) (return-from find-oneof-name child))
+      ((and (consp child) (eq (car child) :oneofName))
+       (return-from find-oneof-name (if (stringp (cadr child))
+                                        (cadr child)
+                                        (find-name-in-node child))))))
+  "unknown")
+
+(defun transform-oneof-field (node oneof-index)
+  "Transform a oneofField parse node into a proto-field-descriptor with oneof-index set"
+  (let ((field-desc (make-instance 'proto-field-descriptor))
+        (type nil)
+        (name nil)
+        (number nil))
+    (dolist (child (cdr node))
+      (cond
+        ((stringp child)
+         (cond
+           ((member child '("double" "float" "int32" "int64" "uint32" "uint64"
+                            "sint32" "sint64" "fixed32" "fixed64" "sfixed32" "sfixed64"
+                            "bool" "string" "bytes") :test #'string=)
+            (setf type (intern (string-upcase child) :keyword)))
+           ((null name) (setf name child))))
+        ((and (consp child) (eq (car child) :type))
+         (setf type (extract-type child)))
+        ((and (consp child) (eq (car child) :fieldName))
+         (setf name (find-name-in-node child)))
+        ((and (consp child) (eq (car child) :fieldNumber))
+         (setf number (extract-int-value child)))
+        ((and (consp child) (member (car child) '(:intLit :decimalLit)))
+         (setf number (extract-int-value child)))))
+    (setf (proto-field-name field-desc) (or name "unknown"))
+    (setf (proto-field-number field-desc) (or number 0))
+    (setf (proto-field-type field-desc) (or type :unknown))
+    (setf (proto-field-label field-desc) :optional)
+    (setf (proto-field-oneof-index field-desc) oneof-index)
+    field-desc))
 
 (defun transform-option (node)
   "Transform an option parse node into a cons of (name . value)"

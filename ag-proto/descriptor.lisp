@@ -144,6 +144,16 @@
             :documentation "Method-level options"))
   (:documentation "Descriptor for a gRPC service method"))
 
+(defclass proto-oneof-descriptor ()
+  ((name :initarg :name :accessor proto-oneof-name
+         :documentation "Oneof name")
+   (index :initarg :index :accessor proto-oneof-index
+          :documentation "Index of this oneof in the message")
+   (fields :initarg :fields :accessor proto-oneof-fields
+           :initform nil
+           :documentation "List of field descriptors in this oneof"))
+  (:documentation "Descriptor for a proto oneof group"))
+
 ;;;; ========================================================================
 ;;;; Proto3 Scalar Types
 ;;;; ========================================================================
