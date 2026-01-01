@@ -153,10 +153,11 @@
 (defparameter *grpc-accept-encoding* "identity"
   "Accepted response encoding(s)")
 
-(defun make-request-headers (method &key timeout metadata authority)
-  "Create standard gRPC request headers"
+(defun make-request-headers (method &key timeout metadata authority tls)
+  "Create standard gRPC request headers.
+   If TLS is true, use https scheme."
   (let ((headers (list (cons :method "POST")
-                       (cons :scheme "http")  ; or "https"
+                       (cons :scheme (if tls "https" "http"))
                        (cons :path method)
                        (cons :authority (or authority ""))
                        (cons "content-type" *grpc-content-type*)

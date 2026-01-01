@@ -57,4 +57,8 @@
    ;; Conditions
    #:http2-error
    #:http2-connection-error
-   #:http2-stream-error))
+   #:http2-stream-error
+
+   ;; TLS
+   #:tls-available-p
+   #:try-load-tls))

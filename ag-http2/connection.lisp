@@ -32,6 +32,8 @@
            :documentation "Underlying socket connection")
    (stream :initarg :stream :accessor connection-stream
            :documentation "Binary stream for reading/writing")
+   (tls-p :initarg :tls-p :accessor connection-tls-p :initform nil
+          :documentation "T if connection is using TLS")
    (client-p :initarg :client-p :accessor connection-client-p
              :documentation "T if this is a client connection")
    (hpack-encoder :initform (make-hpack-encoder) :accessor connection-hpack-encoder)
@@ -51,13 +53,19 @@
    (last-stream-id :initform 0 :accessor connection-last-stream-id))
   (:documentation "HTTP/2 connection"))
 
-(defun make-client-connection (host port)
-  "Create a new HTTP/2 client connection"
+(defun make-client-connection (host port &key tls (verify nil))
+  "Create a new HTTP/2 client connection.
+   If TLS is true, wrap the connection with TLS encryption.
+   VERIFY controls certificate verification (default nil)."
   (let* ((socket (usocket:socket-connect host port :element-type '(unsigned-byte 8)))
-         (stream (usocket:socket-stream socket))
+         (raw-stream (usocket:socket-stream socket))
+         (stream (if tls
+                     (wrap-stream-with-tls raw-stream host :verify verify)
+                     raw-stream))
          (conn (make-instance 'http2-connection
                               :socket socket
                               :stream stream
+                              :tls-p tls
                               :client-p t)))
     (setf (connection-multiplexer conn) (make-stream-multiplexer :client-p t))
     (connection-handshake conn)

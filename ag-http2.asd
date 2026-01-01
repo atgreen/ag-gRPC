@@ -13,4 +13,5 @@
                (:file "frames")
                (:file "streams")
                (:file "flow-control")
+               (:file "tls")
                (:file "connection")))

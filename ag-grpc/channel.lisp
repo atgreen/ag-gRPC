@@ -15,6 +15,12 @@
          :documentation "Server hostname")
    (port :initarg :port :accessor channel-port
          :documentation "Server port")
+   (tls :initarg :tls :accessor channel-tls
+        :initform nil
+        :documentation "Use TLS encryption")
+   (tls-verify :initarg :tls-verify :accessor channel-tls-verify
+               :initform nil
+               :documentation "Verify TLS certificates")
    (connection :initarg :connection :accessor channel-connection
                :initform nil
                :documentation "HTTP/2 connection")
@@ -26,17 +32,31 @@
              :documentation "Default metadata for all calls"))
   (:documentation "gRPC client channel"))
 
-(defun make-channel (host port &key (connect t) timeout metadata)
+(defun make-channel (host port &key (connect t) timeout metadata tls (tls-verify nil))
   "Create a new gRPC channel to a server.
-If CONNECT is true (default), immediately establish the connection."
+If CONNECT is true (default), immediately establish the connection.
+If TLS is true, use TLS encryption (requires cl+ssl).
+If TLS-VERIFY is true, verify server certificates."
   (let ((channel (make-instance 'grpc-channel
                                 :host host
                                 :port port
+                                :tls tls
+                                :tls-verify tls-verify
                                 :default-timeout (or timeout 30)
                                 :metadata metadata)))
     (when connect
       (channel-connect channel))
     channel))
+
+(defun make-secure-channel (host port &key (connect t) timeout metadata (verify nil))
+  "Create a new gRPC channel with TLS encryption.
+Convenience function equivalent to (make-channel ... :tls t)."
+  (make-channel host port
+                :connect connect
+                :timeout timeout
+                :metadata metadata
+                :tls t
+                :tls-verify verify))
 
 (defun channel-connect (channel)
   "Establish the connection for this channel"
@@ -44,7 +64,9 @@ If CONNECT is true (default), immediately establish the connection."
     (setf (channel-connection channel)
           (ag-http2:make-client-connection
            (channel-host channel)
-           (channel-port channel)))))
+           (channel-port channel)
+           :tls (channel-tls channel)
+           :verify (channel-tls-verify channel)))))
 
 (defun channel-connected-p (channel)
   "Return T if the channel has an active connection"
@@ -84,8 +106,13 @@ If CONNECT is true (default), immediately establish the connection."
          (headers (make-request-headers method
                                         :authority authority
                                         :timeout (or timeout (channel-default-timeout channel))
-                                        :metadata metadata)))
+                                        :metadata metadata
+                                        :tls (channel-tls channel))))
     (ag-http2:connection-send-headers conn stream-id headers :end-stream end-stream)))
+
+(defun channel-tls-p (channel)
+  "Return T if the channel is using TLS encryption"
+  (channel-tls channel))
 
 (defun channel-send-message (channel stream-id message &key end-stream)
   "Send a message on a stream"

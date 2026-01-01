@@ -39,7 +39,9 @@
    ;; Channel
    #:grpc-channel
    #:make-channel
+   #:make-secure-channel
    #:channel-close
+   #:channel-tls-p
 
    ;; Call
    #:grpc-call

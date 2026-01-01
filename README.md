@@ -12,12 +12,13 @@ ag-gRPC provides a complete gRPC client stack written entirely in portable Commo
 
 ## Features
 
-- Pure Common Lisp - no foreign dependencies
+- Pure Common Lisp - minimal foreign dependencies
 - Proto3 wire format encoding/decoding
 - .proto file parser with code generation to CLOS classes
 - Full HPACK implementation including Huffman coding
 - HTTP/2 client with stream multiplexing and flow control
 - gRPC unary RPC calls
+- Optional TLS/SSL support (via cl+ssl)
 - Interoperability tested against Go gRPC servers
 
 ## Installation
@@ -96,6 +97,45 @@ Or use the CLI tool:
 (ag-grpc:channel-close *channel*)
 ```
 
+## TLS/SSL Support
+
+ag-gRPC supports optional TLS encryption via [cl+ssl](https://github.com/cl-plus-ssl/cl-plus-ssl).
+
+### Using TLS
+
+```lisp
+;; Create a secure channel
+(defvar *channel* (ag-grpc:make-secure-channel "api.example.com" 443))
+
+;; Or explicitly:
+(defvar *channel* (ag-grpc:make-channel "api.example.com" 443 :tls t))
+
+;; With certificate verification:
+(defvar *channel* (ag-grpc:make-channel "api.example.com" 443
+                                         :tls t
+                                         :tls-verify t))
+```
+
+### TLS Requirements
+
+TLS support requires cl+ssl and OpenSSL:
+
+**Linux/macOS:** OpenSSL is typically pre-installed.
+
+**Windows:** Install OpenSSL from [slproweb.com](https://slproweb.com/products/Win32OpenSSL.html) and add the bin directory to your PATH.
+
+### Checking TLS Availability
+
+```lisp
+;; Check if TLS is available
+(ag-http2:tls-available-p)  ; => T or NIL
+
+;; Explicitly load TLS support
+(ag-http2:try-load-tls)
+```
+
+If TLS is requested but cl+ssl is not available, an error will be signaled.
+
 ## Systems
 
 ### ag-proto
@@ -167,12 +207,16 @@ make interop
 
 ## Dependencies
 
+**Required:**
 - [usocket](https://github.com/usocket/usocket) - Portable socket library
 - [trivial-utf-8](https://gitlab.common-lisp.net/trivial-utf-8/trivial-utf-8) - UTF-8 encoding
 - [ieee-floats](https://github.com/marijnh/ieee-floats) - IEEE 754 float encoding
 - [iparse](https://github.com/atgreen/iparse) - Parser combinator library
 - [clingon](https://github.com/dnaeon/clingon) - CLI framework (for ag-protoc)
 - [version-string](https://github.com/atgreen/cl-version-string) - Version string generation
+
+**Optional:**
+- [cl+ssl](https://github.com/cl-plus-ssl/cl-plus-ssl) - TLS/SSL support (requires OpenSSL)
 
 ## Supported Implementations
 
@@ -187,7 +231,6 @@ Current limitations (contributions welcome!):
 
 - Client-side only (no server implementation yet)
 - Unary RPCs only (no streaming)
-- No TLS/SSL support yet
 - No load balancing or service discovery
 - No deadline propagation
 
