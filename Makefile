@@ -2,7 +2,7 @@
 
 all: cli
 
-cli: ag-proto/*.lisp ag-proto-cli/*.lisp *.asd ag-proto/*.asd ag-proto-cli/*.asd
+cli: ag-proto/*.lisp ag-proto-cli/*.lisp *.asd 
 	sbcl --eval "(require 'asdf)" \
 	     --eval "(asdf:initialize-source-registry (list :source-registry :inherit-configuration (list :directory (uiop:getcwd)) (list :directory (merge-pathnames \"ag-proto-cli/\" (uiop:getcwd))) (list :tree (merge-pathnames \"ocicl/\" (uiop:getcwd)))))" \
 	     --eval "(asdf:make :ag-proto-cli)" --quit
