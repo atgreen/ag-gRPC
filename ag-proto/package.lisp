@@ -121,6 +121,10 @@
    #:generate-lisp-code
    #:compile-proto-file
    #:compile-proto-string
+   #:generate-service-code
+
+   ;; Client stubs
+   #:stub-channel
 
    ;; Runtime
    #:proto-message

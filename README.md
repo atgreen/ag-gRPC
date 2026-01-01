@@ -15,6 +15,7 @@ ag-gRPC provides a complete gRPC client stack written entirely in portable Commo
 - Pure Common Lisp - minimal foreign dependencies
 - Proto3 wire format encoding/decoding
 - .proto file parser with code generation to CLOS classes
+- **Generated client stubs** - type-safe RPC methods from service definitions
 - Full HPACK implementation including Huffman coding
 - HTTP/2 client with stream multiplexing and flow control
 - gRPC unary RPC calls
@@ -70,7 +71,31 @@ Or use the CLI tool:
 ./ag-protoc -o hello.lisp hello.proto
 ```
 
-### Make a gRPC call
+### Make a gRPC call (using generated stubs)
+
+```lisp
+;; Create a channel to the server
+(defvar *channel* (ag-grpc:make-channel "localhost" 50051))
+
+;; Create a client stub
+(defvar *greeter* (make-greeter-stub *channel*))
+
+;; Create a request and make the call
+(defvar *request* (make-instance 'hellorequest :name "World"))
+
+;; The stub method returns (values response status call)
+(multiple-value-bind (response status)
+    (greeter-say-hello *greeter* *request*)
+  (format t "Status: ~A~%" status)
+  (format t "Message: ~A~%" (message response)))
+;; Status: 0
+;; Message: Hello World
+
+;; Clean up
+(ag-grpc:channel-close *channel*)
+```
+
+### Make a gRPC call (low-level API)
 
 ```lisp
 ;; Create a channel to the server
@@ -79,7 +104,7 @@ Or use the CLI tool:
 ;; Create a request
 (defvar *request* (make-instance 'hellorequest :name "World"))
 
-;; Make the RPC call
+;; Make the RPC call directly
 (defvar *call* (ag-grpc:call-unary *channel*
                                     "/hello.Greeter/SayHello"
                                     *request*
@@ -146,6 +171,7 @@ Protocol Buffers implementation:
 - Proto3 .proto file parser
 - CLOS class generation with `serialize-to-bytes` and `deserialize-from-bytes` methods
 - Support for all scalar types, nested messages, enums, and repeated fields
+- **Client stub generation** from service definitions (e.g., `Greeter` → `greeter-stub` class with `greeter-say-hello` method)
 
 ### ag-http2
 

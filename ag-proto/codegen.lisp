@@ -399,11 +399,14 @@
 
 ;;; Main code generation entry points
 
-(defun generate-lisp-code (file-desc &key (package *package*))
+(defun generate-lisp-code (file-desc &key (package *package*) (generate-stubs t))
   "Generate Lisp code for all messages in a proto file descriptor.
-Returns a list of forms to be compiled."
+Returns a list of forms to be compiled.
+If GENERATE-STUBS is true (default), also generates client stubs for services."
   (let ((messages (proto-file-messages file-desc))
         (enums (proto-file-enums file-desc))
+        (services (proto-file-services file-desc))
+        (proto-package (proto-file-package file-desc))
         (forms nil))
     ;; Generate enums first
     (dolist (enum enums)
@@ -421,6 +424,11 @@ Returns a list of forms to be compiled."
         (push (generate-class-definition nested-msg package) forms)
         (push (generate-serializer nested-msg package) forms)
         (push (generate-deserializer nested-msg package) forms)))
+    ;; Generate service stubs
+    (when generate-stubs
+      (dolist (service services)
+        (dolist (form (generate-service-code service proto-package package))
+          (push form forms))))
     (nreverse forms)))
 
 (defun compile-proto-file (pathname &key (output-file nil) (load t) (package *package*))
@@ -452,3 +460,104 @@ Returns the list of generated forms."
       (dolist (form forms)
         (eval form)))
     forms))
+
+;;;; ========================================================================
+;;;; Client Stub Generation
+;;;;
+;;;; Generates typed client stubs for gRPC services.
+;;;; Each service becomes a stub class with methods for each RPC.
+;;;; ========================================================================
+
+(defun lisp-name (name &optional suffix)
+  "Convert a proto name to a Lisp symbol name.
+   FooBar becomes FOO-BAR, with optional SUFFIX appended."
+  (with-output-to-string (s)
+    (loop for i from 0 below (length name)
+          for char = (char name i)
+          for prev-char = (if (> i 0) (char name (1- i)) nil)
+          do (cond
+               ;; Insert hyphen before uppercase if previous was lowercase
+               ((and prev-char
+                     (upper-case-p char)
+                     (lower-case-p prev-char))
+                (write-char #\- s)
+                (write-char (char-upcase char) s))
+               ;; Convert underscore to hyphen
+               ((char= char #\_)
+                (write-char #\- s))
+               ;; Normal character
+               (t
+                (write-char (char-upcase char) s))))
+    (when suffix
+      (write-string suffix s))))
+
+(defun generate-stub-class (service-desc package)
+  "Generate a stub class definition for a service"
+  (let* ((name (proto-service-name service-desc))
+         (class-name (intern (lisp-name name "-STUB") package)))
+    `(defclass ,class-name ()
+       ((channel :initarg :channel :accessor stub-channel
+                 :documentation "gRPC channel for this stub"))
+       (:documentation ,(format nil "Client stub for ~A service" name)))))
+
+(defun generate-stub-constructor (service-desc package)
+  "Generate a constructor function for a stub"
+  (let* ((name (proto-service-name service-desc))
+         (class-name (intern (lisp-name name "-STUB") package))
+         (constructor-name (intern (concatenate 'string "MAKE-" (lisp-name name "-STUB")) package)))
+    `(defun ,constructor-name (channel)
+       ,(format nil "Create a new ~A client stub" name)
+       (make-instance ',class-name :channel channel))))
+
+(defun generate-rpc-method (service-desc method-desc proto-package package)
+  "Generate a method for an RPC call"
+  (let* ((service-name (proto-service-name service-desc))
+         (method-name (proto-method-name method-desc))
+         (stub-class (intern (lisp-name service-name "-STUB") package))
+         (fn-name (intern (lisp-name (format nil "~A-~A" service-name method-name)) package))
+         (output-type (proto-method-output-type method-desc))
+         (response-class (intern (string-upcase output-type) package))
+         ;; Build the method path: /package.Service/Method
+         (method-path (if (and proto-package (plusp (length proto-package)))
+                          (format nil "/~A.~A/~A" proto-package service-name method-name)
+                          (format nil "/~A/~A" service-name method-name)))
+         (client-streaming (proto-method-client-streaming method-desc))
+         (server-streaming (proto-method-server-streaming method-desc)))
+    ;; For now, only generate unary RPCs (no streaming)
+    (if (or client-streaming server-streaming)
+        ;; Generate a placeholder for streaming methods
+        `(defmethod ,fn-name ((stub ,stub-class) request &key metadata timeout)
+           ,(format nil "Call ~A.~A RPC (streaming - not yet implemented)" service-name method-name)
+           (declare (ignore stub request metadata timeout))
+           (error "Streaming RPCs not yet implemented: ~A" ,method-path))
+        ;; Generate unary RPC method - use funcall with symbol lookup for ag-grpc dependency
+        `(defmethod ,fn-name ((stub ,stub-class) request &key metadata timeout)
+           ,(format nil "Call ~A.~A unary RPC" service-name method-name)
+           (let* ((grpc-pkg (find-package :ag-grpc))
+                  (call-fn (and grpc-pkg (symbol-function (find-symbol "CALL-UNARY" grpc-pkg))))
+                  (response-fn (and grpc-pkg (fdefinition (find-symbol "CALL-RESPONSE" grpc-pkg))))
+                  (status-fn (and grpc-pkg (fdefinition (find-symbol "CALL-STATUS" grpc-pkg)))))
+             (unless call-fn
+               (error "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
+             (let ((call (funcall call-fn
+                                  (stub-channel stub)
+                                  ,method-path
+                                  request
+                                  :response-type ',response-class
+                                  :metadata metadata
+                                  :timeout timeout)))
+               (values (funcall response-fn call)
+                       (funcall status-fn call)
+                       call)))))))
+
+(defun generate-service-code (service-desc proto-package package)
+  "Generate all code for a service (stub class, constructor, methods)"
+  (let ((forms nil))
+    ;; Stub class
+    (push (generate-stub-class service-desc package) forms)
+    ;; Constructor
+    (push (generate-stub-constructor service-desc package) forms)
+    ;; RPC methods
+    (dolist (method (proto-service-methods service-desc))
+      (push (generate-rpc-method service-desc method proto-package package) forms))
+    (nreverse forms)))
