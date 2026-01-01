@@ -60,6 +60,14 @@
    #:stream-collect-all
    #:do-stream-messages
 
+   ;; Client streaming
+   #:grpc-client-stream
+   #:call-client-streaming
+   #:stream-send
+   #:stream-close-and-recv
+   #:client-stream-closed-p
+   #:with-client-stream
+
    ;; Conditions
    #:grpc-error
    #:grpc-status-error))

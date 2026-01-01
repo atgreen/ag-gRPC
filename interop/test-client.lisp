@@ -64,6 +64,33 @@
       (and (eql (ag-grpc:stream-status stream) ag-grpc:+grpc-status-ok+)
            (= message-count 3)))))
 
+;; Test client streaming RPC
+(defun test-client-streaming (channel)
+  (format t "~&~%=== Test 3: Client Streaming RPC ===~%")
+  (format t "~&Opening client stream...~%")
+  (let ((stream (ag-grpc:call-client-streaming channel
+                                                "/hello.Greeter/CollectHellos"
+                                                :response-type 'hellosummary)))
+    ;; Send several messages
+    (format t "~&Sending 3 HelloRequest messages...~%")
+    (ag-grpc:stream-send stream (make-instance 'hellorequest :name "Alice"))
+    (format t "~&  Sent: name='Alice'~%")
+    (ag-grpc:stream-send stream (make-instance 'hellorequest :name "Bob"))
+    (format t "~&  Sent: name='Bob'~%")
+    (ag-grpc:stream-send stream (make-instance 'hellorequest :name "Charlie"))
+    (format t "~&  Sent: name='Charlie'~%")
+    ;; Close and get response
+    (format t "~&Closing stream and receiving response...~%")
+    (multiple-value-bind (response status)
+        (ag-grpc:stream-close-and-recv stream)
+      (format t "~&Response received!~%")
+      (format t "~&  Status: ~A~%" status)
+      (format t "~&  Total requests: ~A~%" (total-requests response))
+      (format t "~&  Combined names: ~A~%" (combined-names response))
+      (and (eql status ag-grpc:+grpc-status-ok+)
+           (= (total-requests response) 3)
+           (string= (combined-names response) "Alice, Bob, Charlie")))))
+
 ;; Run all tests
 (defun run-interop-tests ()
   (handler-case
@@ -76,6 +103,9 @@
                  (setf all-passed nil))
                ;; Test 2: Server Streaming RPC
                (unless (test-server-streaming channel)
+                 (setf all-passed nil))
+               ;; Test 3: Client Streaming RPC
+               (unless (test-client-streaming channel)
                  (setf all-passed nil)))
           ;; Clean up
           (ag-grpc:channel-close channel))

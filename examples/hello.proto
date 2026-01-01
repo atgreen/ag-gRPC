@@ -14,10 +14,18 @@ message HelloReply {
   int32 index = 2;  // For streaming: which reply this is (0-indexed)
 }
 
+message HelloSummary {
+  int32 total_requests = 1;
+  string combined_names = 2;
+}
+
 service Greeter {
   // Unary RPC
   rpc SayHello (HelloRequest) returns (HelloReply);
 
   // Server streaming RPC - sends 'count' replies
   rpc SayHelloStream (HelloRequest) returns (stream HelloReply);
+
+  // Client streaming RPC - receives multiple requests, returns a summary
+  rpc CollectHellos (stream HelloRequest) returns (HelloSummary);
 }

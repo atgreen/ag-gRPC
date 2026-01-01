@@ -532,12 +532,28 @@ Returns the list of generated forms."
          (client-streaming (proto-method-client-streaming method-desc))
          (server-streaming (proto-method-server-streaming method-desc)))
     (cond
-      ;; Client streaming or bidirectional - not yet implemented
+      ;; Bidirectional streaming - not yet implemented
+      ((and client-streaming server-streaming)
+       `(defmethod ,fn-name ((stub ,stub-class) &key metadata timeout)
+          ,(format nil "Call ~A.~A RPC (bidirectional streaming - not yet implemented)" service-name method-name)
+          (declare (ignore stub metadata timeout))
+          (error "Bidirectional streaming RPCs not yet implemented: ~A" ,method-path)))
+      ;; Client streaming - returns a client stream object
       (client-streaming
-       `(defmethod ,fn-name ((stub ,stub-class) request &key metadata timeout)
-          ,(format nil "Call ~A.~A RPC (client streaming - not yet implemented)" service-name method-name)
-          (declare (ignore stub request metadata timeout))
-          (error "Client streaming RPCs not yet implemented: ~A" ,method-path)))
+       `(defmethod ,fn-name ((stub ,stub-class) &key metadata timeout)
+          ,(format nil "Initiate ~A.~A client streaming RPC.
+Returns a grpc-client-stream. Use stream-send to send messages,
+then stream-close-and-recv to get the response." service-name method-name)
+          (let* ((grpc-pkg (find-package :ag-grpc))
+                 (call-fn (and grpc-pkg (symbol-function (find-symbol "CALL-CLIENT-STREAMING" grpc-pkg)))))
+            (unless call-fn
+              (error "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
+            (funcall call-fn
+                     (stub-channel stub)
+                     ,method-path
+                     :response-type ',response-class
+                     :metadata metadata
+                     :timeout timeout))))
       ;; Server streaming - returns a stream object
       (server-streaming
        `(defmethod ,fn-name ((stub ,stub-class) request &key metadata timeout)

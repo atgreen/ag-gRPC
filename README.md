@@ -18,7 +18,7 @@ ag-gRPC provides a complete gRPC client stack written entirely in portable Commo
 - **Generated client stubs** - type-safe RPC methods from service definitions
 - Full HPACK implementation including Huffman coding
 - HTTP/2 client with stream multiplexing and flow control
-- gRPC unary and **server streaming** RPC calls
+- gRPC unary, **server streaming**, and **client streaming** RPC calls
 - Optional TLS/SSL support (via cl+ssl)
 - Interoperability tested against Go gRPC servers
 
@@ -157,6 +157,55 @@ ag-gRPC supports server streaming RPCs where the server sends multiple responses
                                                  :response-type 'feature))
 ```
 
+## Client Streaming
+
+ag-gRPC supports client streaming RPCs where the client sends multiple requests and receives a single response:
+
+```lisp
+;; Using generated stubs (recommended)
+(defvar *stream* (greeter-collect-hellos *stub*))
+
+;; Send multiple messages
+(ag-grpc:stream-send *stream* request1)
+(ag-grpc:stream-send *stream* request2)
+(ag-grpc:stream-send *stream* request3)
+
+;; Close and get the response
+(multiple-value-bind (response status)
+    (ag-grpc:stream-close-and-recv *stream*)
+  (format t "Status: ~A~%" status)
+  (format t "Response: ~A~%" response))
+```
+
+### Using the with-client-stream macro
+
+```lisp
+;; Automatic cleanup with macro
+(multiple-value-bind (response status)
+    (ag-grpc:with-client-stream (stream channel "/pkg.Svc/Collect"
+                                  :response-type 'summary)
+      (ag-grpc:stream-send stream point1)
+      (ag-grpc:stream-send stream point2)
+      (ag-grpc:stream-send stream point3))
+  (process-response response))
+```
+
+### Low-level client streaming API
+
+```lisp
+;; Direct channel access
+(defvar *stream* (ag-grpc:call-client-streaming channel
+                                                 "/hello.Greeter/CollectHellos"
+                                                 :response-type 'hellosummary))
+
+;; Send messages
+(ag-grpc:stream-send *stream* (make-instance 'hellorequest :name "Alice"))
+(ag-grpc:stream-send *stream* (make-instance 'hellorequest :name "Bob"))
+
+;; Finish and get response
+(ag-grpc:stream-close-and-recv *stream*)
+```
+
 ## TLS/SSL Support
 
 ag-gRPC supports optional TLS encryption via [cl+ssl](https://github.com/cl-plus-ssl/cl-plus-ssl).
@@ -227,6 +276,7 @@ gRPC protocol:
 - Status codes per gRPC specification
 - Unary RPC calls
 - **Server streaming RPC** with iterator/callback support
+- **Client streaming RPC** with stream-send/close-and-recv pattern
 - Channel abstraction over HTTP/2 connections
 
 ## CLI Tool
@@ -292,7 +342,7 @@ Should work on other implementations supporting usocket.
 Current limitations (contributions welcome!):
 
 - Client-side only (no server implementation yet)
-- Server streaming only (no client streaming or bidirectional yet)
+- No bidirectional streaming yet (unary, server streaming, and client streaming are supported)
 - No load balancing or service discovery
 - No deadline propagation
 

@@ -49,6 +49,38 @@ func (s *server) SayHelloStream(in *pb.HelloRequest, stream pb.Greeter_SayHelloS
 	return nil
 }
 
+// Client streaming RPC
+func (s *server) CollectHellos(stream pb.Greeter_CollectHellosServer) error {
+	var names []string
+	count := int32(0)
+
+	log.Printf("CollectHellos: starting to receive messages")
+	for {
+		req, err := stream.Recv()
+		if err != nil {
+			// End of stream
+			break
+		}
+		count++
+		names = append(names, req.GetName())
+		log.Printf("  Received message %d: name=%v", count, req.GetName())
+	}
+
+	combined := ""
+	for i, name := range names {
+		if i > 0 {
+			combined += ", "
+		}
+		combined += name
+	}
+
+	log.Printf("CollectHellos complete: received %d messages", count)
+	return stream.SendAndClose(&pb.HelloSummary{
+		TotalRequests: count,
+		CombinedNames: combined,
+	})
+}
+
 func main() {
 	flag.Parse()
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))

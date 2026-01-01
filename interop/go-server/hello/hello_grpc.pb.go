@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.0
 // - protoc             v3.19.6
-// source: hello.proto
+// source: hello/hello.proto
 
 package hello
 
@@ -21,6 +21,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	Greeter_SayHello_FullMethodName       = "/hello.Greeter/SayHello"
 	Greeter_SayHelloStream_FullMethodName = "/hello.Greeter/SayHelloStream"
+	Greeter_CollectHellos_FullMethodName  = "/hello.Greeter/CollectHellos"
 )
 
 // GreeterClient is the client API for Greeter service.
@@ -31,6 +32,8 @@ type GreeterClient interface {
 	SayHello(ctx context.Context, in *HelloRequest, opts ...grpc.CallOption) (*HelloReply, error)
 	// Server streaming RPC - sends 'count' replies
 	SayHelloStream(ctx context.Context, in *HelloRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[HelloReply], error)
+	// Client streaming RPC - receives multiple requests, returns a summary
+	CollectHellos(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[HelloRequest, HelloSummary], error)
 }
 
 type greeterClient struct {
@@ -70,6 +73,19 @@ func (c *greeterClient) SayHelloStream(ctx context.Context, in *HelloRequest, op
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Greeter_SayHelloStreamClient = grpc.ServerStreamingClient[HelloReply]
 
+func (c *greeterClient) CollectHellos(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[HelloRequest, HelloSummary], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Greeter_ServiceDesc.Streams[1], Greeter_CollectHellos_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[HelloRequest, HelloSummary]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Greeter_CollectHellosClient = grpc.ClientStreamingClient[HelloRequest, HelloSummary]
+
 // GreeterServer is the server API for Greeter service.
 // All implementations must embed UnimplementedGreeterServer
 // for forward compatibility.
@@ -78,6 +94,8 @@ type GreeterServer interface {
 	SayHello(context.Context, *HelloRequest) (*HelloReply, error)
 	// Server streaming RPC - sends 'count' replies
 	SayHelloStream(*HelloRequest, grpc.ServerStreamingServer[HelloReply]) error
+	// Client streaming RPC - receives multiple requests, returns a summary
+	CollectHellos(grpc.ClientStreamingServer[HelloRequest, HelloSummary]) error
 	mustEmbedUnimplementedGreeterServer()
 }
 
@@ -93,6 +111,9 @@ func (UnimplementedGreeterServer) SayHello(context.Context, *HelloRequest) (*Hel
 }
 func (UnimplementedGreeterServer) SayHelloStream(*HelloRequest, grpc.ServerStreamingServer[HelloReply]) error {
 	return status.Error(codes.Unimplemented, "method SayHelloStream not implemented")
+}
+func (UnimplementedGreeterServer) CollectHellos(grpc.ClientStreamingServer[HelloRequest, HelloSummary]) error {
+	return status.Error(codes.Unimplemented, "method CollectHellos not implemented")
 }
 func (UnimplementedGreeterServer) mustEmbedUnimplementedGreeterServer() {}
 func (UnimplementedGreeterServer) testEmbeddedByValue()                 {}
@@ -144,6 +165,13 @@ func _Greeter_SayHelloStream_Handler(srv interface{}, stream grpc.ServerStream) 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Greeter_SayHelloStreamServer = grpc.ServerStreamingServer[HelloReply]
 
+func _Greeter_CollectHellos_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(GreeterServer).CollectHellos(&grpc.GenericServerStream[HelloRequest, HelloSummary]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Greeter_CollectHellosServer = grpc.ClientStreamingServer[HelloRequest, HelloSummary]
+
 // Greeter_ServiceDesc is the grpc.ServiceDesc for Greeter service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -162,6 +190,11 @@ var Greeter_ServiceDesc = grpc.ServiceDesc{
 			Handler:       _Greeter_SayHelloStream_Handler,
 			ServerStreams: true,
 		},
+		{
+			StreamName:    "CollectHellos",
+			Handler:       _Greeter_CollectHellos_Handler,
+			ClientStreams: true,
+		},
 	},
-	Metadata: "hello.proto",
+	Metadata: "hello/hello.proto",
 }

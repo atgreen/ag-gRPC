@@ -315,3 +315,137 @@ Example:
   (let ((messages nil))
     (do-stream-messages (msg server-stream (nreverse messages))
       (push msg messages))))
+
+;;;; ========================================================================
+;;;; Client Streaming RPC
+;;;; ========================================================================
+
+(defclass grpc-client-stream ()
+  ((call :initarg :call :accessor stream-call
+         :documentation "The underlying gRPC call")
+   (channel :initarg :channel :accessor client-stream-channel
+            :documentation "The gRPC channel")
+   (stream-id :initarg :stream-id :accessor client-stream-id
+              :documentation "HTTP/2 stream ID")
+   (response-type :initarg :response-type :accessor client-stream-response-type
+                  :initform nil
+                  :documentation "Response type for deserialization")
+   (closed-p :initform nil :accessor client-stream-closed-p
+             :documentation "True when client has finished sending"))
+  (:documentation "Represents a client streaming request"))
+
+(defun call-client-streaming (channel method &key metadata timeout response-type)
+  "Initiate a client streaming RPC call.
+CHANNEL - The gRPC channel to use
+METHOD - The method path (e.g., \"/package.Service/RecordRoute\")
+METADATA - Optional call metadata
+TIMEOUT - Optional timeout in seconds (overrides channel default)
+RESPONSE-TYPE - Response type symbol for deserialization
+
+Returns a grpc-client-stream object. Use stream-send to send messages,
+then stream-close-and-recv to finish and get the response."
+  (ensure-connected channel)
+  (let* ((stream (channel-new-stream channel))
+         (stream-id (ag-http2:stream-id stream))
+         (call (make-instance 'grpc-call
+                              :channel channel
+                              :method method
+                              :stream-id stream-id
+                              :request-metadata metadata)))
+    ;; Send request headers (NOT end-stream, we're going to send data)
+    (channel-send-headers channel stream-id method
+                          :metadata metadata
+                          :timeout timeout
+                          :end-stream nil)
+    ;; Return the client stream object
+    (make-instance 'grpc-client-stream
+                   :call call
+                   :channel channel
+                   :stream-id stream-id
+                   :response-type response-type)))
+
+(defun stream-send (client-stream message)
+  "Send a message on a client stream.
+MESSAGE can be a proto-message or a byte vector.
+Returns the client-stream for chaining."
+  (when (client-stream-closed-p client-stream)
+    (error "Cannot send on closed client stream"))
+  (let ((message-bytes (if (typep message 'vector)
+                           message
+                           (ag-proto:serialize-to-bytes message))))
+    (channel-send-message (client-stream-channel client-stream)
+                          (client-stream-id client-stream)
+                          message-bytes
+                          :end-stream nil))
+  client-stream)
+
+(defun stream-close-and-recv (client-stream)
+  "Close the client stream and receive the server's response.
+Signals END_STREAM to the server, then waits for the response.
+Returns (values response status) where response is the deserialized message."
+  (when (client-stream-closed-p client-stream)
+    (error "Client stream already closed"))
+  (setf (client-stream-closed-p client-stream) t)
+  (let* ((channel (client-stream-channel client-stream))
+         (stream-id (client-stream-id client-stream))
+         (call (stream-call client-stream))
+         (conn (channel-connection channel)))
+    ;; Send empty DATA frame with END_STREAM to signal we're done sending
+    (ag-http2:connection-send-data conn stream-id
+                                   (make-array 0 :element-type '(unsigned-byte 8))
+                                   :end-stream t)
+    ;; Receive response headers
+    (setf (call-response-headers call)
+          (channel-receive-headers channel stream-id))
+    ;; Check initial response status
+    (let ((status-header (assoc :status (call-response-headers call))))
+      (unless (and status-header (string= (cdr status-header) "200"))
+        (setf (call-status call) +grpc-status-unknown+)
+        (return-from stream-close-and-recv
+          (values nil (call-status call)))))
+    ;; Receive response message
+    (let ((response-data (channel-receive-message channel stream-id)))
+      (when response-data
+        (setf (call-response call)
+              (if (client-stream-response-type client-stream)
+                  (ag-proto:deserialize-from-bytes
+                   (client-stream-response-type client-stream) response-data)
+                  response-data))))
+    ;; Receive trailers (contains gRPC status)
+    (setf (call-response-trailers call)
+          (channel-receive-trailers channel stream-id))
+    ;; Extract status from trailers
+    (let ((status-trailer (assoc "grpc-status" (call-response-trailers call)
+                                 :test #'string-equal)))
+      (setf (call-status call)
+            (if status-trailer
+                (parse-integer (cdr status-trailer))
+                +grpc-status-ok+)))
+    (let ((message-trailer (assoc "grpc-message" (call-response-trailers call)
+                                  :test #'string-equal)))
+      (when message-trailer
+        (setf (call-status-message call)
+              (percent-decode (cdr message-trailer)))))
+    ;; Signal error if not OK
+    (unless (grpc-status-ok-p (call-status call))
+      (error 'grpc-status-error
+             :code (call-status call)
+             :message (call-status-message call)))
+    (values (call-response call) (call-status call))))
+
+(defmacro with-client-stream ((var channel method &key metadata timeout response-type) &body body)
+  "Execute BODY with VAR bound to a client stream, ensuring proper cleanup.
+After BODY executes, automatically calls stream-close-and-recv.
+Returns (values response status).
+
+Example:
+  (with-client-stream (stream channel \"/pkg.Svc/Record\" :response-type 'summary)
+    (stream-send stream point1)
+    (stream-send stream point2)
+    (stream-send stream point3))"
+  `(let ((,var (call-client-streaming ,channel ,method
+                                       :metadata ,metadata
+                                       :timeout ,timeout
+                                       :response-type ,response-type)))
+     ,@body
+     (stream-close-and-recv ,var)))
