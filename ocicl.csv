@@ -16,6 +16,8 @@ cl-ppcre, ghcr.io/ocicl/cl-ppcre@sha256:bf073924cf4fd5957a4fd961a95d446ed0e53fa3
 cl-ppcre-unicode, ghcr.io/ocicl/cl-ppcre@sha256:bf073924cf4fd5957a4fd961a95d446ed0e53fa32a5002cbd2d52182874f45e5, cl-ppcre-20250606-a2ea581/cl-ppcre-unicode.asd
 cl-reexport, ghcr.io/ocicl/cl-reexport@sha256:c795feb3e3727a19e61797187eb31bac1e855b1332335d26752200a28e9b9da8, cl-reexport-20240503-03ad7a0/cl-reexport.asd
 cl-reexport-test, ghcr.io/ocicl/cl-reexport@sha256:c795feb3e3727a19e61797187eb31bac1e855b1332335d26752200a28e9b9da8, cl-reexport-20240503-03ad7a0/cl-reexport-test.asd
+cl_plus_ssl, ghcr.io/ocicl/cl_plus_ssl@sha256:d50fbbba38827e835eec2415744e0fb05a2a0bf4d44940cdc23922f15036efe5, cl-plus-ssl-20251220-499b2f5/cl+ssl.asd
+cl_plus_ssl.test, ghcr.io/ocicl/cl_plus_ssl@sha256:d50fbbba38827e835eec2415744e0fb05a2a0bf4d44940cdc23922f15036efe5, cl-plus-ssl-20251220-499b2f5/cl+ssl.test.asd
 clingon, ghcr.io/ocicl/clingon@sha256:5d3babf7af5b0e7bfba2bfa9d384f70810ae6e538f899f0aba7e0b1308eee2eb, clingon-20251121-ef0528f/clingon.asd
 clingon.demo, ghcr.io/ocicl/clingon@sha256:5d3babf7af5b0e7bfba2bfa9d384f70810ae6e538f899f0aba7e0b1308eee2eb, clingon-20251121-ef0528f/clingon.demo.asd
 clingon.intro, ghcr.io/ocicl/clingon@sha256:5d3babf7af5b0e7bfba2bfa9d384f70810ae6e538f899f0aba7e0b1308eee2eb, clingon-20251121-ef0528f/clingon.intro.asd
@@ -25,6 +27,8 @@ dref, ghcr.io/ocicl/mgl-pax-bootstrap@sha256:2adeaafc448ed8fd7fbe59459d57da74996
 dref-test, ghcr.io/ocicl/mgl-pax-bootstrap@sha256:2adeaafc448ed8fd7fbe59459d57da7499625a00b8af92cacca5adfcb94509db, mgl-pax-20251221-c1c1edb/dref/dref-test.asd
 dref-test-package-inferred, ghcr.io/ocicl/mgl-pax-bootstrap@sha256:2adeaafc448ed8fd7fbe59459d57da7499625a00b8af92cacca5adfcb94509db, mgl-pax-20251221-c1c1edb/dref/test/data/dref-test-package-inferred.asd
 fiveam, ghcr.io/ocicl/fiveam@sha256:e283043dc8d31e8df2b214465cf5a06ea07bdbea10e600a40e17aaf9518226ac, fiveam-20240928-e43d6c8/fiveam.asd
+flexi-streams, ghcr.io/ocicl/flexi-streams@sha256:95005b06a8a95c82780c75ead53810bcb273d07fcf5fe76b527f1856df9923f2, flexi-streams-20240503-4951d57/flexi-streams.asd
+flexi-streams-test, ghcr.io/ocicl/flexi-streams@sha256:95005b06a8a95c82780c75ead53810bcb273d07fcf5fe76b527f1856df9923f2, flexi-streams-20240503-4951d57/flexi-streams-test.asd
 fset, ghcr.io/ocicl/fset@sha256:06ed3b2b8e490fa5ddf01b23af08a5d0d5febf6633b982eab0f721f4cc3c8c15, fset-20251122-19eadf0/fset.asd
 global-vars, ghcr.io/ocicl/global-vars@sha256:d197e871c9c9abc4bf31b1186f5fd28f0ca848ebe2e9dddf2d82ecee01dbdc65, global-vars-20240503-c749f32/global-vars.asd
 global-vars-test, ghcr.io/ocicl/global-vars@sha256:d197e871c9c9abc4bf31b1186f5fd28f0ca848ebe2e9dddf2d82ecee01dbdc65, global-vars-20240503-c749f32/global-vars-test.asd
@@ -53,6 +57,8 @@ trivial-backtrace-test, ghcr.io/ocicl/trivial-backtrace@sha256:89a3138695bb767c5
 trivial-features, ghcr.io/ocicl/trivial-features@sha256:e278e24d39060fc7d3715531b16ddd9ab7f93f22ade53e436c0b86dbae3aa065, trivial-features-1.0/trivial-features.asd
 trivial-features-tests, ghcr.io/ocicl/trivial-features@sha256:e278e24d39060fc7d3715531b16ddd9ab7f93f22ade53e436c0b86dbae3aa065, trivial-features-1.0/trivial-features-tests.asd
 trivial-garbage, ghcr.io/ocicl/trivial-garbage@sha256:a85dcf4110ad60ae9f6c70970acceb2bf12402ce5326891643d35506059afb1d, trivial-garbage-20240503-3474f64/trivial-garbage.asd
+trivial-gray-streams, ghcr.io/ocicl/trivial-gray-streams@sha256:d0cc9fb73876100ee60647524f98b5b22566fa1c3a985d79548b0d2b228f8b51, trivial-gray-streams-20240503-a7ead68/trivial-gray-streams.asd
+trivial-gray-streams-test, ghcr.io/ocicl/trivial-gray-streams@sha256:d0cc9fb73876100ee60647524f98b5b22566fa1c3a985d79548b0d2b228f8b51, trivial-gray-streams-20240503-a7ead68/trivial-gray-streams-test.asd
 trivial-utf-8, ghcr.io/ocicl/trivial-utf-8@sha256:014e7fa0edd7f351c8b38c3247e0cdda438235bb8a086bb0f2bac08f78ef400d, trivial-utf-8-20240503-ba9b4ff/trivial-utf-8.asd
 uffi, ghcr.io/ocicl/cffi-grovel@sha256:0854274d437e36f8bd30549103de36d23ac22f481f2746e61785e883f52b25fa, cffi-20250822-dad3520/uffi-compat/uffi.asd
 usocket, ghcr.io/ocicl/usocket@sha256:282856b819b22a4319ba30a15605ee934aa23292a471fd29ea4d3f2074b3f16d, usocket-0.8.8/usocket.asd
