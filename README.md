@@ -13,12 +13,15 @@ ag-gRPC provides a complete gRPC client stack written entirely in portable Commo
 ## Features
 
 - Pure Common Lisp - minimal foreign dependencies
+- **Idiomatic Lisp API** with convenience macros (`with-channel`, `with-call`, `with-bidi-stream`)
 - Proto3 wire format encoding/decoding
 - .proto file parser with code generation to CLOS classes
 - **Generated client stubs** - type-safe RPC methods from service definitions
 - Full HPACK implementation including Huffman coding
 - HTTP/2 client with stream multiplexing and flow control
 - **Full streaming support**: unary, server streaming, client streaming, and bidirectional streaming
+- **Stream collectors**: `collect-stream-messages`, `map-stream-messages`, `reduce-stream-messages`
+- Gray stream integration for composable I/O
 - Optional TLS/SSL support (via cl+ssl)
 - Interoperability tested against Go gRPC servers
 
@@ -35,6 +38,89 @@ Or load via ASDF after adding to your source registry:
 
 ```lisp
 (asdf:load-system :ag-grpc)
+```
+
+## Idiomatic Lisp API
+
+ag-gRPC provides a clean, idiomatic Common Lisp API with convenience macros for resource management:
+
+### Convenience Macros
+
+```lisp
+;; Automatic channel cleanup
+(ag-grpc:with-channel (ch "localhost" 50051)
+  (ag-grpc:with-call (call ch "/hello.Greeter/SayHello" request
+                       :response-type 'helloreply)
+    (format t "Response: ~A~%" (ag-grpc:call-response call))))
+
+;; Server streaming with automatic iteration
+(ag-grpc:with-channel (ch "localhost" 50051)
+  (ag-grpc:with-server-stream (stream ch "/hello.Greeter/ListFeatures" request
+                                :response-type 'feature)
+    (ag-grpc:do-stream-messages (feature stream)
+      (process-feature feature))))
+
+;; Bidirectional streaming with automatic cleanup
+(ag-grpc:with-channel (ch "localhost" 50051)
+  (ag-grpc:with-bidi-stream (stream ch "/hello.Greeter/Chat"
+                              :response-type 'chatmessage)
+    (ag-grpc:stream-send stream msg1)
+    (ag-grpc:stream-send stream msg2)
+    (ag-grpc:stream-close-send stream)
+    (ag-grpc:do-bidi-recv (reply stream)
+      (handle-reply reply))))
+```
+
+### Metadata API
+
+```lisp
+;; Create metadata
+(defvar *md* (ag-grpc:make-grpc-metadata))
+(ag-grpc:metadata-set *md* "authorization" "Bearer token123")
+(ag-grpc:metadata-add *md* "x-custom-header" "value")
+
+;; Query metadata
+(ag-grpc:metadata-get *md* "authorization")  ; => "Bearer token123"
+(ag-grpc:metadata-keys *md*)                 ; => ("authorization" "x-custom-header")
+(ag-grpc:metadata-count *md*)                ; => 2
+
+;; Immutable-style operations
+(defvar *md2* (ag-grpc:metadata-copy *md*))
+(defvar *merged* (ag-grpc:metadata-merge *md* *other-md*))
+
+;; Use with RPC calls
+(ag-grpc:call-unary channel method request :metadata *md*)
+```
+
+### Stream Collectors
+
+```lisp
+;; Collect all messages into a list
+(ag-grpc:collect-stream-messages stream)
+
+;; Collect with limit and transform
+(ag-grpc:collect-stream-messages stream :limit 10 :transform #'extract-id)
+
+;; Map over stream messages
+(ag-grpc:map-stream-messages #'process-message stream)
+
+;; Reduce stream messages
+(ag-grpc:reduce-stream-messages #'+ stream 0)  ; Sum all values
+
+;; Find first matching message
+(ag-grpc:find-in-stream #'important-p stream)
+```
+
+### Response Objects
+
+```lisp
+;; Create response from call
+(let ((response (ag-grpc:make-response-from-call call)))
+  (when (ag-grpc:response-ok-p response)
+    (process (ag-grpc:response-message response)))
+  ;; Lazy metadata access (converted to grpc-metadata on demand)
+  (ag-grpc:response-header response "x-request-id")
+  (ag-grpc:response-trailer response "grpc-status"))
 ```
 
 ## Quick Start
@@ -307,6 +393,7 @@ Protocol Buffers implementation:
 - CLOS class generation with `serialize-to-bytes` and `deserialize-from-bytes` methods
 - Support for all scalar types, nested messages, enums, and repeated fields
 - **Client stub generation** from service definitions (e.g., `Greeter` → `greeter-stub` class with `greeter-say-hello` method)
+- **Gray stream support** for composable serialization (`sequence-input-stream`, `sequence-output-stream`)
 
 ### ag-http2
 
@@ -323,13 +410,16 @@ HTTP/2 implementation:
 gRPC protocol:
 
 - gRPC message framing (5-byte header)
-- Metadata handling (headers and trailers)
+- Metadata handling with CLOS wrapper (`grpc-metadata` class)
 - Status codes per gRPC specification
 - Unary RPC calls
 - **Server streaming RPC** with iterator/callback support
 - **Client streaming RPC** with stream-send/close-and-recv pattern
 - **Bidirectional streaming RPC** with interleaved send/receive
 - Channel abstraction over HTTP/2 connections
+- **Convenience macros** for lifecycle management (`with-channel`, `with-call`, etc.)
+- **Stream collectors** for functional stream processing
+- **Response objects** with lazy metadata conversion
 
 ## CLI Tool
 
@@ -375,6 +465,7 @@ make interop
 - [usocket](https://github.com/usocket/usocket) - Portable socket library
 - [trivial-utf-8](https://gitlab.common-lisp.net/trivial-utf-8/trivial-utf-8) - UTF-8 encoding
 - [ieee-floats](https://github.com/marijnh/ieee-floats) - IEEE 754 float encoding
+- [trivial-gray-streams](https://github.com/trivial-gray-streams/trivial-gray-streams) - Gray stream support
 - [iparse](https://github.com/atgreen/iparse) - Parser combinator library
 - [clingon](https://github.com/dnaeon/clingon) - CLI framework (for ag-protoc)
 - [version-string](https://github.com/atgreen/cl-version-string) - Version string generation
