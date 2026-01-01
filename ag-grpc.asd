@@ -14,4 +14,5 @@
                (:file "metadata")
                (:file "channel")
                (:file "call")
-               (:file "response")))
+               (:file "response")
+               (:file "server")))

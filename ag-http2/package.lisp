@@ -40,6 +40,11 @@
    #:+settings-max-frame-size+
    #:+settings-max-header-list-size+
 
+   ;; Frame flags
+   #:+flag-end-stream+
+   #:+flag-end-headers+
+   #:+flag-ack+
+
    ;; Stream states
    #:http2-stream
    #:stream-state
@@ -64,6 +69,10 @@
    #:connection-state
    #:connection-multiplexer
    #:connection-new-stream
+   #:connection-client-p
+
+   ;; Server connection
+   #:server-connection-handshake
 
    ;; Stream accessors
    #:stream-headers

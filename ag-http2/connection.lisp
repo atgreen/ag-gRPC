@@ -96,7 +96,7 @@
 ;;;; ========================================================================
 
 (defun connection-handshake (conn)
-  "Perform the HTTP/2 connection handshake"
+  "Perform the HTTP/2 connection handshake (client-side)"
   (let ((stream (connection-stream conn)))
     (when (connection-client-p conn)
       ;; Client sends preface
@@ -112,6 +112,41 @@
           ;; Send SETTINGS ACK
           (write-frame (make-settings-frame :ack t) stream)
           (force-output stream))))
+    (setf (connection-state conn) :open)))
+
+(defun server-connection-handshake (conn)
+  "Perform the HTTP/2 connection handshake (server-side).
+Reads and validates client preface, exchanges SETTINGS frames."
+  (let ((stream (connection-stream conn)))
+    ;; Read and validate the client connection preface (24 bytes)
+    (let ((preface (make-array 24 :element-type '(unsigned-byte 8))))
+      (let ((bytes-read (read-sequence preface stream)))
+        (unless (= bytes-read 24)
+          (error 'http2-connection-error
+                 :message "Incomplete connection preface"
+                 :error-code +error-protocol-error+)))
+      (unless (equalp preface +connection-preface+)
+        (error 'http2-connection-error
+               :message "Invalid connection preface"
+               :error-code +error-protocol-error+)))
+    ;; Read client's initial SETTINGS frame
+    (let ((frame (read-frame stream)))
+      (unless (typep frame 'settings-frame)
+        (error 'http2-connection-error
+               :message "Expected SETTINGS frame after preface"
+               :error-code +error-protocol-error+))
+      (when (settings-frame-ack-p frame)
+        (error 'http2-connection-error
+               :message "First SETTINGS frame must not be ACK"
+               :error-code +error-protocol-error+))
+      (apply-remote-settings conn (settings-frame-settings frame)))
+    ;; Send our SETTINGS
+    (write-frame (make-settings-frame :settings (connection-local-settings conn))
+                 stream)
+    ;; Send SETTINGS ACK for client's settings
+    (write-frame (make-settings-frame :ack t) stream)
+    (force-output stream)
+    ;; Mark connection as open
     (setf (connection-state conn) :open)))
 
 (defun apply-remote-settings (conn settings)

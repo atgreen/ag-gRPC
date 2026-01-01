@@ -124,4 +124,26 @@
 
    ;; Conditions
    #:grpc-error
-   #:grpc-status-error))
+   #:grpc-status-error
+
+   ;; Server
+   #:grpc-server
+   #:make-grpc-server
+   #:server-start
+   #:server-stop
+   #:server-state
+   #:server-register-handler
+   #:with-grpc-server
+
+   ;; Call context
+   #:grpc-call-context
+   #:context-metadata
+   #:context-peer-address
+   #:context-deadline
+   #:context-set-response-metadata
+   #:context-set-trailing-metadata
+
+   ;; Server streams
+   #:grpc-server-call-stream
+   #:stream-recv
+   #:do-stream-recv))
