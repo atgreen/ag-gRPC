@@ -71,7 +71,7 @@ Convenience function equivalent to (make-channel ... :tls t)."
 (defun channel-connected-p (channel)
   "Return T if the channel has an active connection"
   (and (channel-connection channel)
-       (eq (ag-http2::connection-state (channel-connection channel)) :open)))
+       (eq (ag-http2:connection-state (channel-connection channel)) :open)))
 
 (defun channel-close (channel)
   "Close the channel and its connection"
@@ -97,7 +97,7 @@ Convenience function equivalent to (make-channel ... :tls t)."
 
 (defun channel-new-stream (channel)
   "Create a new HTTP/2 stream for an RPC call"
-  (ag-http2::connection-new-stream (channel-connection channel)))
+  (ag-http2:connection-new-stream (channel-connection channel)))
 
 (defun channel-send-headers (channel stream-id method &key metadata timeout end-stream)
   "Send request headers for an RPC call"
@@ -125,25 +125,25 @@ Convenience function equivalent to (make-channel ... :tls t)."
 (defun channel-receive-headers (channel stream-id)
   "Receive response headers from a stream"
   (let* ((conn (channel-connection channel))
-         (stream (ag-http2::multiplexer-get-stream
-                  (ag-http2::connection-multiplexer conn)
+         (stream (ag-http2:multiplexer-get-stream
+                  (ag-http2:connection-multiplexer conn)
                   stream-id)))
     ;; Read frames until we get headers
-    (loop while (null (ag-http2::stream-headers stream))
+    (loop while (null (ag-http2:stream-headers stream))
           do (ag-http2:connection-read-frame conn))
-    (ag-http2::stream-headers stream)))
+    (ag-http2:stream-headers stream)))
 
 (defun channel-receive-message (channel stream-id)
   "Receive a message from a stream.
 Handles messages that span multiple HTTP/2 DATA frames."
   (let* ((conn (channel-connection channel))
-         (stream (ag-http2::multiplexer-get-stream
-                  (ag-http2::connection-multiplexer conn)
+         (stream (ag-http2:multiplexer-get-stream
+                  (ag-http2:connection-multiplexer conn)
                   stream-id)))
     ;; Keep reading until we have a complete gRPC message or stream closes
     (loop
       ;; Try to decode from current buffer (non-destructively peek first)
-      (let* ((buffer (ag-http2::stream-data-buffer stream))
+      (let* ((buffer (ag-http2:stream-data-buffer stream))
              (result (decode-grpc-message buffer 0)))
         (when result
           ;; Got a complete message - consume exactly what we decoded
@@ -157,7 +157,7 @@ Handles messages that span multiple HTTP/2 DATA frames."
                     do (vector-push-extend byte buffer)))
             (return data))))
       ;; Need more data - check if stream can receive more
-      (unless (ag-http2::stream-can-recv-p stream)
+      (unless (ag-http2:stream-can-recv-p stream)
         ;; Stream closed without complete message
         (return nil))
       ;; Read another frame
@@ -166,10 +166,10 @@ Handles messages that span multiple HTTP/2 DATA frames."
 (defun channel-receive-trailers (channel stream-id)
   "Receive trailers from a stream (contains gRPC status)"
   (let* ((conn (channel-connection channel))
-         (stream (ag-http2::multiplexer-get-stream
-                  (ag-http2::connection-multiplexer conn)
+         (stream (ag-http2:multiplexer-get-stream
+                  (ag-http2:connection-multiplexer conn)
                   stream-id)))
     ;; Read until stream is closed
-    (loop while (ag-http2::stream-can-recv-p stream)
+    (loop while (ag-http2:stream-can-recv-p stream)
           do (ag-http2:connection-read-frame conn))
-    (ag-http2::stream-trailers stream)))
+    (ag-http2:stream-trailers stream)))

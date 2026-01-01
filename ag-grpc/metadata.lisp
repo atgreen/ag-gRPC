@@ -63,6 +63,43 @@
   (remove-duplicates (mapcar #'car (metadata-entries metadata))
                      :test #'string=))
 
+(defun metadata-count (metadata)
+  "Return the number of entries"
+  (length (metadata-entries metadata)))
+
+(defun metadata-empty-p (metadata)
+  "Return T if metadata has no entries"
+  (null (metadata-entries metadata)))
+
+(defun metadata-copy (metadata)
+  "Create a copy of the metadata (for immutable-style updates)"
+  (let ((copy (make-instance 'grpc-metadata)))
+    (setf (metadata-entries copy)
+          (copy-alist (metadata-entries metadata)))
+    copy))
+
+(defun metadata-merge (base &rest others)
+  "Merge multiple metadata objects, later entries override earlier ones.
+Returns a new metadata object."
+  (let ((result (metadata-copy base)))
+    (dolist (other others)
+      (dolist (entry (metadata-entries other))
+        (metadata-set result (car entry) (cdr entry))))
+    result))
+
+(defun metadata-to-alist (metadata)
+  "Convert metadata to an alist"
+  (copy-alist (metadata-entries metadata)))
+
+(defun alist-to-metadata (alist)
+  "Convert an alist to metadata"
+  (make-grpc-metadata alist))
+
+(defmethod print-object ((md grpc-metadata) stream)
+  "Print metadata in a readable format"
+  (print-unreadable-object (md stream :type t)
+    (format stream "~D entries" (metadata-count md))))
+
 ;;;; ========================================================================
 ;;;; Binary Metadata
 ;;;; ========================================================================

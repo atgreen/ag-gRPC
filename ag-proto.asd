@@ -6,7 +6,7 @@
   :license "MIT"
   :version "0.1.0"
   :serial t
-  :depends-on (#:iparse #:trivial-utf-8 #:ieee-floats)
+  :depends-on (#:iparse #:trivial-utf-8 #:ieee-floats #:trivial-gray-streams)
   :pathname "ag-proto"
   :components ((:file "package")
                (:file "wire-format")

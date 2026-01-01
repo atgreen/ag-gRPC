@@ -232,8 +232,8 @@ When the stream ends, also sets stream-status."))
          (channel (call-channel call))
          (stream-id (call-stream-id call))
          (conn (channel-connection channel))
-         (h2-stream (ag-http2::multiplexer-get-stream
-                     (ag-http2::connection-multiplexer conn)
+         (h2-stream (ag-http2:multiplexer-get-stream
+                     (ag-http2:connection-multiplexer conn)
                      stream-id))
          (buffer (stream-buffer server-stream)))
     ;; Try to decode a message from the buffer first
@@ -253,9 +253,9 @@ When the stream ends, also sets stream-status."))
     ;; Need to read more data
     (loop
       ;; Check if stream can still receive
-      (unless (ag-http2::stream-can-recv-p h2-stream)
+      (unless (ag-http2:stream-can-recv-p h2-stream)
         ;; Stream is done, extract final status from trailers (decode binary metadata)
-        (let* ((raw-trailers (ag-http2::stream-trailers h2-stream))
+        (let* ((raw-trailers (ag-http2:stream-trailers h2-stream))
                (trailers (append raw-trailers (decode-metadata-headers raw-trailers))))
           (setf (call-response-trailers call) trailers)
           (let ((status-trailer (assoc "grpc-status" trailers :test #'string-equal)))
@@ -284,7 +284,7 @@ When the stream ends, also sets stream-status."))
       ;; Read a frame
       (ag-http2:connection-read-frame conn)
       ;; Copy any new data to our buffer
-      (let ((new-data (ag-http2::stream-consume-data h2-stream)))
+      (let ((new-data (ag-http2:stream-consume-data h2-stream)))
         (loop for byte across new-data
               do (vector-push-extend byte buffer)))
       ;; Try to decode a message
@@ -559,8 +559,8 @@ When the stream ends, also sets stream-status."
          (channel (bidi-stream-channel bidi-stream))
          (stream-id (bidi-stream-id bidi-stream))
          (conn (channel-connection channel))
-         (h2-stream (ag-http2::multiplexer-get-stream
-                     (ag-http2::connection-multiplexer conn)
+         (h2-stream (ag-http2:multiplexer-get-stream
+                     (ag-http2:connection-multiplexer conn)
                      stream-id))
          (buffer (bidi-stream-buffer bidi-stream)))
     ;; First time reading: check for response headers (decode binary metadata)
@@ -591,9 +591,9 @@ When the stream ends, also sets stream-status."
     ;; Need to read more data
     (loop
       ;; Check if stream can still receive
-      (unless (ag-http2::stream-can-recv-p h2-stream)
+      (unless (ag-http2:stream-can-recv-p h2-stream)
         ;; Stream is done, extract final status from trailers (decode binary metadata)
-        (let* ((raw-trailers (ag-http2::stream-trailers h2-stream))
+        (let* ((raw-trailers (ag-http2:stream-trailers h2-stream))
                (trailers (append raw-trailers (decode-metadata-headers raw-trailers))))
           (setf (call-response-trailers call) trailers)
           (let ((status-trailer (assoc "grpc-status" trailers :test #'string-equal)))
@@ -622,7 +622,7 @@ When the stream ends, also sets stream-status."
       ;; Read a frame
       (ag-http2:connection-read-frame conn)
       ;; Copy any new data to our buffer
-      (let ((new-data (ag-http2::stream-consume-data h2-stream)))
+      (let ((new-data (ag-http2:stream-consume-data h2-stream)))
         (loop for byte across new-data
               do (vector-push-extend byte buffer)))
       ;; Try to decode a message
@@ -654,3 +654,64 @@ Example:
              while ,var
              do (progn ,@body)
              finally (return ,result)))))
+
+;;;; ========================================================================
+;;;; Convenience Macros
+;;;; ========================================================================
+
+(defmacro with-channel ((var host port &rest args &key connect timeout metadata tls tls-verify) &body body)
+  "Execute BODY with VAR bound to a gRPC channel, ensuring proper cleanup.
+The channel is automatically closed when BODY exits (normally or via error).
+
+Example:
+  (with-channel (ch \"localhost\" 50051)
+    (call-unary ch \"/pkg.Svc/Method\" request))"
+  (declare (ignore connect timeout metadata tls tls-verify))
+  `(let ((,var (make-channel ,host ,port ,@args)))
+     (unwind-protect
+          (progn ,@body)
+       (channel-close ,var))))
+
+(defmacro with-call ((var channel method request &rest args
+                      &key metadata timeout response-type) &body body)
+  "Execute BODY with VAR bound to a completed unary call result.
+Provides convenient access to call results with automatic error handling.
+
+Example:
+  (with-call (call ch \"/pkg.Svc/Method\" request :response-type 'response)
+    (format t \"Response: ~A~%\" (call-response call)))"
+  (declare (ignore metadata timeout response-type))
+  `(let ((,var (call-unary ,channel ,method ,request ,@args)))
+     ,@body))
+
+(defmacro with-bidi-stream ((var channel method &rest args
+                             &key metadata timeout response-type) &body body)
+  "Execute BODY with VAR bound to a bidirectional stream.
+Automatically closes the send side when BODY exits.
+
+Example:
+  (with-bidi-stream (stream ch \"/pkg.Svc/Chat\" :response-type 'msg)
+    (stream-send stream msg1)
+    (stream-send stream msg2)
+    (stream-close-send stream)
+    (do-bidi-recv (reply stream)
+      (process reply)))"
+  (declare (ignore metadata timeout response-type))
+  `(let ((,var (call-bidirectional-streaming ,channel ,method ,@args)))
+     (unwind-protect
+          (progn ,@body)
+       (unless (bidi-stream-send-closed-p ,var)
+         (stream-close-send ,var)))))
+
+(defmacro with-server-stream ((var channel method request &rest args
+                               &key metadata timeout response-type) &body body)
+  "Execute BODY with VAR bound to a server streaming response.
+Provides convenient iteration over server stream responses.
+
+Example:
+  (with-server-stream (stream ch \"/pkg.Svc/List\" request :response-type 'item)
+    (do-stream-messages (item stream)
+      (process item)))"
+  (declare (ignore metadata timeout response-type))
+  `(let ((,var (call-server-streaming ,channel ,method ,request ,@args)))
+     ,@body))

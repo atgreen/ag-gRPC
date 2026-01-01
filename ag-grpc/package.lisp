@@ -32,9 +32,20 @@
 
    ;; Metadata
    #:grpc-metadata
+   #:make-grpc-metadata
    #:metadata-get
+   #:metadata-get-all
    #:metadata-set
    #:metadata-add
+   #:metadata-remove
+   #:metadata-clear
+   #:metadata-keys
+   #:metadata-count
+   #:metadata-empty-p
+   #:metadata-copy
+   #:metadata-merge
+   #:metadata-to-alist
+   #:alist-to-metadata
 
    ;; Channel
    #:grpc-channel
@@ -75,6 +86,41 @@
    #:bidi-stream-send-closed-p
    #:bidi-stream-recv-finished-p
    #:do-bidi-recv
+
+   ;; Convenience macros
+   #:with-channel
+   #:with-call
+   #:with-client-stream
+   #:with-bidi-stream
+   #:with-server-stream
+
+   ;; Response objects
+   #:grpc-response
+   #:make-response-from-call
+   #:response-ok-p
+   #:response-message
+   #:response-status
+   #:response-status-message
+   #:response-headers
+   #:response-trailers
+   #:response-header
+   #:response-trailer
+   #:response-value
+   #:check-response
+
+   ;; Stream iterators
+   #:grpc-stream-iterator
+   #:make-stream-iterator
+   #:iterator-next
+   #:iterator-peek
+   #:iterator-done-p
+   #:iterator-status
+
+   ;; Stream collectors
+   #:collect-stream-messages
+   #:map-stream-messages
+   #:reduce-stream-messages
+   #:find-in-stream
 
    ;; Conditions
    #:grpc-error

@@ -58,6 +58,24 @@
    #:http2-error
    #:http2-connection-error
    #:http2-stream-error
+   #:http2-frame-error
+
+   ;; Connection accessors
+   #:connection-state
+   #:connection-multiplexer
+   #:connection-new-stream
+
+   ;; Stream accessors
+   #:stream-headers
+   #:stream-trailers
+   #:stream-data-buffer
+   #:stream-can-send-p
+   #:stream-can-recv-p
+   #:stream-consume-data
+
+   ;; Multiplexer
+   #:multiplexer-get-stream
+   #:multiplexer-new-stream
 
    ;; TLS
    #:tls-available-p

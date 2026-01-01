@@ -60,46 +60,113 @@ SEQUENCE should be an adjustable vector with a fill-pointer."
   `(let ((,var (make-sequence-input-stream ,sequence)))
      ,@body))
 
-;;; Simple sequence streams (portable implementation)
+;;; Gray stream implementation for sequence I/O
+;;; These classes implement the Gray stream protocol for full CL stream compatibility
 
-(defclass sequence-input-stream ()
+(defclass sequence-input-stream (trivial-gray-streams:fundamental-binary-input-stream)
   ((data :initarg :data :reader stream-data)
-   (position :initform 0 :accessor stream-position)))
+   (position :initform 0 :accessor stream-position)
+   (end :initarg :end :reader stream-end))
+  (:documentation "Gray stream for reading from a byte sequence"))
 
-(defclass sequence-output-stream ()
-  ((data :initarg :data :accessor stream-data)))
+(defclass sequence-output-stream (trivial-gray-streams:fundamental-binary-output-stream)
+  ((data :initarg :data :accessor stream-data))
+  (:documentation "Gray stream for writing to an adjustable byte sequence"))
 
-(defun make-sequence-input-stream (sequence)
-  "Create an input stream reading from a sequence"
-  (make-instance 'sequence-input-stream :data sequence))
+(defun make-sequence-input-stream (sequence &key (start 0) (end nil))
+  "Create an input stream reading from a sequence.
+Works with standard CL stream operations (read-byte, read-sequence)."
+  (make-instance 'sequence-input-stream
+                 :data sequence
+                 :end (or end (length sequence))))
 
-(defun make-sequence-output-stream (sequence)
-  "Create an output stream writing to an adjustable sequence"
-  (make-instance 'sequence-output-stream :data sequence))
+(defun make-sequence-output-stream (&optional sequence)
+  "Create an output stream writing to an adjustable sequence.
+If SEQUENCE is nil, creates a new adjustable byte vector.
+Works with standard CL stream operations (write-byte, write-sequence)."
+  (make-instance 'sequence-output-stream
+                 :data (or sequence
+                           (make-array 64 :element-type '(unsigned-byte 8)
+                                          :adjustable t :fill-pointer 0))))
 
-(defmethod stream-read-byte ((stream sequence-input-stream))
+;;; Gray stream methods for sequence-input-stream
+
+(defmethod trivial-gray-streams:stream-read-byte ((stream sequence-input-stream))
   "Read a byte from a sequence input stream"
-  (let ((data (stream-data stream))
-        (pos (stream-position stream)))
-    (if (>= pos (length data))
-        nil
-        (prog1 (aref data pos)
+  (let ((pos (stream-position stream)))
+    (if (>= pos (stream-end stream))
+        :eof
+        (prog1 (aref (stream-data stream) pos)
           (incf (stream-position stream))))))
 
-(defmethod stream-write-byte ((stream sequence-output-stream) byte)
-  "Write a byte to a sequence output stream"
-  (vector-push-extend byte (stream-data stream)))
+(defmethod trivial-gray-streams:stream-read-sequence ((stream sequence-input-stream)
+                                                       sequence start end
+                                                       &key &allow-other-keys)
+  "Read bytes from sequence input stream into SEQUENCE"
+  (let* ((src (stream-data stream))
+         (src-pos (stream-position stream))
+         (src-end (stream-end stream))
+         (available (- src-end src-pos))
+         (requested (- end start))
+         (to-read (min available requested)))
+    (when (plusp to-read)
+      (replace sequence src
+               :start1 start :end1 (+ start to-read)
+               :start2 src-pos :end2 (+ src-pos to-read))
+      (incf (stream-position stream) to-read))
+    (+ start to-read)))
 
-;;; Gray stream integration would go here for full stream compatibility
-;;; For now, use these simple stream classes with explicit method calls
+(defmethod trivial-gray-streams:stream-listen ((stream sequence-input-stream))
+  "Check if data is available"
+  (< (stream-position stream) (stream-end stream)))
+
+(defmethod stream-element-type ((stream sequence-input-stream))
+  '(unsigned-byte 8))
+
+;;; Gray stream methods for sequence-output-stream
+
+(defmethod trivial-gray-streams:stream-write-byte ((stream sequence-output-stream) byte)
+  "Write a byte to a sequence output stream"
+  (vector-push-extend byte (stream-data stream))
+  byte)
+
+(defmethod trivial-gray-streams:stream-write-sequence ((stream sequence-output-stream)
+                                                        sequence start end
+                                                        &key &allow-other-keys)
+  "Write bytes from SEQUENCE to the output stream"
+  (loop for i from start below end
+        do (vector-push-extend (aref sequence i) (stream-data stream)))
+  sequence)
+
+(defmethod stream-element-type ((stream sequence-output-stream))
+  '(unsigned-byte 8))
+
+;;; Stream utility functions
+
+(defun sequence-stream-contents (stream)
+  "Get the byte vector from a sequence output stream"
+  (stream-data stream))
+
+(defun sequence-stream-position (stream)
+  "Get the current position in a sequence input stream"
+  (stream-position stream))
+
+(defun sequence-stream-remaining (stream)
+  "Get remaining bytes in a sequence input stream"
+  (- (stream-end stream) (stream-position stream)))
+
+;;; Legacy compatibility (deprecated, use standard stream operations)
 
 (defun read-byte-from-seq-stream (stream)
-  "Read a byte from a sequence stream, return NIL on EOF"
-  (stream-read-byte stream))
+  "Read a byte from a sequence stream, return NIL on EOF.
+DEPRECATED: Use (read-byte stream nil nil) instead."
+  (let ((byte (read-byte stream nil :eof)))
+    (if (eq byte :eof) nil byte)))
 
 (defun write-byte-to-seq-stream (byte stream)
-  "Write a byte to a sequence stream"
-  (stream-write-byte stream byte))
+  "Write a byte to a sequence stream.
+DEPRECATED: Use (write-byte byte stream) instead."
+  (write-byte byte stream))
 
 ;;;; ========================================================================
 ;;;; Message Utilities

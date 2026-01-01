@@ -142,6 +142,17 @@
    #:deserialize-from-stream
    #:deserialize-from-bytes
 
+   ;; Gray stream utilities
+   #:sequence-input-stream
+   #:sequence-output-stream
+   #:make-sequence-input-stream
+   #:make-sequence-output-stream
+   #:sequence-stream-contents
+   #:sequence-stream-position
+   #:sequence-stream-remaining
+   #:with-output-to-sequence
+   #:with-input-from-sequence
+
    ;; Conditions
    #:proto-error
    #:wire-format-error
