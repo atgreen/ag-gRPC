@@ -18,7 +18,7 @@ ag-gRPC provides a complete gRPC client stack written entirely in portable Commo
 - **Generated client stubs** - type-safe RPC methods from service definitions
 - Full HPACK implementation including Huffman coding
 - HTTP/2 client with stream multiplexing and flow control
-- gRPC unary, **server streaming**, and **client streaming** RPC calls
+- **Full streaming support**: unary, server streaming, client streaming, and bidirectional streaming
 - Optional TLS/SSL support (via cl+ssl)
 - Interoperability tested against Go gRPC servers
 
@@ -206,6 +206,57 @@ ag-gRPC supports client streaming RPCs where the client sends multiple requests 
 (ag-grpc:stream-close-and-recv *stream*)
 ```
 
+## Bidirectional Streaming
+
+ag-gRPC supports bidirectional streaming where both client and server can send messages concurrently:
+
+```lisp
+;; Using generated stubs (recommended)
+(defvar *stream* (greeter-chat *stub*))
+
+;; Send and receive can be interleaved
+(ag-grpc:stream-send *stream* request1)
+(let ((reply (ag-grpc:stream-read-message *stream*)))
+  (process reply))
+
+(ag-grpc:stream-send *stream* request2)
+(let ((reply (ag-grpc:stream-read-message *stream*)))
+  (process reply))
+
+;; Close send side when done sending
+(ag-grpc:stream-close-send *stream*)
+
+;; Continue receiving remaining messages
+(ag-grpc:do-bidi-recv (msg *stream*)
+  (format t "Got: ~A~%" msg))
+
+;; Check final status
+(ag-grpc:stream-status *stream*)
+```
+
+### Low-level bidirectional streaming API
+
+```lisp
+;; Direct channel access
+(defvar *stream* (ag-grpc:call-bidirectional-streaming channel
+                                                        "/hello.Greeter/Chat"
+                                                        :response-type 'helloreply))
+
+;; Send messages
+(ag-grpc:stream-send *stream* (make-instance 'hellorequest :name "Alice"))
+
+;; Read responses (can interleave with sends)
+(ag-grpc:stream-read-message *stream*)
+
+;; Signal end of client messages
+(ag-grpc:stream-close-send *stream*)
+
+;; Drain remaining server messages
+(loop for msg = (ag-grpc:stream-read-message *stream*)
+      while msg
+      do (process msg))
+```
+
 ## TLS/SSL Support
 
 ag-gRPC supports optional TLS encryption via [cl+ssl](https://github.com/cl-plus-ssl/cl-plus-ssl).
@@ -277,6 +328,7 @@ gRPC protocol:
 - Unary RPC calls
 - **Server streaming RPC** with iterator/callback support
 - **Client streaming RPC** with stream-send/close-and-recv pattern
+- **Bidirectional streaming RPC** with interleaved send/receive
 - Channel abstraction over HTTP/2 connections
 
 ## CLI Tool
@@ -342,7 +394,6 @@ Should work on other implementations supporting usocket.
 Current limitations (contributions welcome!):
 
 - Client-side only (no server implementation yet)
-- No bidirectional streaming yet (unary, server streaming, and client streaming are supported)
 - No load balancing or service discovery
 - No deadline propagation
 

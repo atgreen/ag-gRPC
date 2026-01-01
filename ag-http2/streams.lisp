@@ -70,6 +70,8 @@ Returns the new state or signals an error for invalid transitions."
                (:recv-rst-stream :closed)))
             (:open
              (ecase event
+               (:recv-headers :open)  ; Response headers, no state change
+               (:recv-data :open)     ; Response body, no state change
                (:send-end-stream :half-closed-local)
                (:recv-end-stream :half-closed-remote)
                (:send-rst-stream :closed)

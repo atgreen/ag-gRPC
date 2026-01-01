@@ -91,6 +91,53 @@
            (= (total-requests response) 3)
            (string= (combined-names response) "Alice, Bob, Charlie")))))
 
+;; Test bidirectional streaming RPC
+(defun test-bidirectional-streaming (channel)
+  (format t "~&~%=== Test 4: Bidirectional Streaming RPC ===~%")
+  (format t "~&Opening bidirectional stream...~%")
+  (let ((stream (ag-grpc:call-bidirectional-streaming channel
+                                                       "/hello.Greeter/Chat"
+                                                       :response-type 'helloreply))
+        (received-count 0))
+    ;; Send and receive interleaved
+    (format t "~&Sending and receiving messages...~%")
+    ;; Send first message
+    (ag-grpc:stream-send stream (make-instance 'hellorequest :name "Alice"))
+    (format t "~&  Sent: name='Alice'~%")
+    ;; Read response
+    (let ((reply (ag-grpc:stream-read-message stream)))
+      (when reply
+        (incf received-count)
+        (format t "~&  Received: [~A] ~A~%" (index reply) (message reply))))
+    ;; Send second message
+    (ag-grpc:stream-send stream (make-instance 'hellorequest :name "Bob"))
+    (format t "~&  Sent: name='Bob'~%")
+    ;; Read response
+    (let ((reply (ag-grpc:stream-read-message stream)))
+      (when reply
+        (incf received-count)
+        (format t "~&  Received: [~A] ~A~%" (index reply) (message reply))))
+    ;; Send third message
+    (ag-grpc:stream-send stream (make-instance 'hellorequest :name "Charlie"))
+    (format t "~&  Sent: name='Charlie'~%")
+    ;; Read response
+    (let ((reply (ag-grpc:stream-read-message stream)))
+      (when reply
+        (incf received-count)
+        (format t "~&  Received: [~A] ~A~%" (index reply) (message reply))))
+    ;; Close send side
+    (format t "~&Closing send side...~%")
+    (ag-grpc:stream-close-send stream)
+    ;; Read any remaining (should be none, server echoes immediately)
+    (loop for reply = (ag-grpc:stream-read-message stream)
+          while reply
+          do (incf received-count)
+             (format t "~&  Extra: [~A] ~A~%" (index reply) (message reply)))
+    (format t "~&Stream finished. Status: ~A~%" (ag-grpc:stream-status stream))
+    (format t "~&Total messages received: ~A~%" received-count)
+    (and (eql (ag-grpc:stream-status stream) ag-grpc:+grpc-status-ok+)
+         (= received-count 3))))
+
 ;; Run all tests
 (defun run-interop-tests ()
   (handler-case
@@ -106,6 +153,9 @@
                  (setf all-passed nil))
                ;; Test 3: Client Streaming RPC
                (unless (test-client-streaming channel)
+                 (setf all-passed nil))
+               ;; Test 4: Bidirectional Streaming RPC
+               (unless (test-bidirectional-streaming channel)
                  (setf all-passed nil)))
           ;; Clean up
           (ag-grpc:channel-close channel))

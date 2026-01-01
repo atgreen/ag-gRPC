@@ -191,11 +191,12 @@ const file_hello_hello_proto_rawDesc = "" +
 	"\x05index\x18\x02 \x01(\x05R\x05index\"\\\n" +
 	"\fHelloSummary\x12%\n" +
 	"\x0etotal_requests\x18\x01 \x01(\x05R\rtotalRequests\x12%\n" +
-	"\x0ecombined_names\x18\x02 \x01(\tR\rcombinedNames2\xb6\x01\n" +
+	"\x0ecombined_names\x18\x02 \x01(\tR\rcombinedNames2\xea\x01\n" +
 	"\aGreeter\x122\n" +
 	"\bSayHello\x12\x13.hello.HelloRequest\x1a\x11.hello.HelloReply\x12:\n" +
 	"\x0eSayHelloStream\x12\x13.hello.HelloRequest\x1a\x11.hello.HelloReply0\x01\x12;\n" +
-	"\rCollectHellos\x12\x13.hello.HelloRequest\x1a\x13.hello.HelloSummary(\x01B\x14Z\x12hello-server/hellob\x06proto3"
+	"\rCollectHellos\x12\x13.hello.HelloRequest\x1a\x13.hello.HelloSummary(\x01\x122\n" +
+	"\x04Chat\x12\x13.hello.HelloRequest\x1a\x11.hello.HelloReply(\x010\x01B\x14Z\x12hello-server/hellob\x06proto3"
 
 var (
 	file_hello_hello_proto_rawDescOnce sync.Once
@@ -219,11 +220,13 @@ var file_hello_hello_proto_depIdxs = []int32{
 	0, // 0: hello.Greeter.SayHello:input_type -> hello.HelloRequest
 	0, // 1: hello.Greeter.SayHelloStream:input_type -> hello.HelloRequest
 	0, // 2: hello.Greeter.CollectHellos:input_type -> hello.HelloRequest
-	1, // 3: hello.Greeter.SayHello:output_type -> hello.HelloReply
-	1, // 4: hello.Greeter.SayHelloStream:output_type -> hello.HelloReply
-	2, // 5: hello.Greeter.CollectHellos:output_type -> hello.HelloSummary
-	3, // [3:6] is the sub-list for method output_type
-	0, // [0:3] is the sub-list for method input_type
+	0, // 3: hello.Greeter.Chat:input_type -> hello.HelloRequest
+	1, // 4: hello.Greeter.SayHello:output_type -> hello.HelloReply
+	1, // 5: hello.Greeter.SayHelloStream:output_type -> hello.HelloReply
+	2, // 6: hello.Greeter.CollectHellos:output_type -> hello.HelloSummary
+	1, // 7: hello.Greeter.Chat:output_type -> hello.HelloReply
+	4, // [4:8] is the sub-list for method output_type
+	0, // [0:4] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name

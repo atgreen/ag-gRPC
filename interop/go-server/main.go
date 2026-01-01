@@ -81,6 +81,33 @@ func (s *server) CollectHellos(stream pb.Greeter_CollectHellosServer) error {
 	})
 }
 
+// Bidirectional streaming RPC - echo chat
+func (s *server) Chat(stream pb.Greeter_ChatServer) error {
+	log.Printf("Chat: starting bidirectional stream")
+	msgNum := int32(0)
+	for {
+		req, err := stream.Recv()
+		if err != nil {
+			// End of client stream
+			log.Printf("Chat: client stream ended after %d messages", msgNum)
+			return nil
+		}
+		msgNum++
+		log.Printf("Chat: received message %d: %v", msgNum, req.GetName())
+
+		// Echo back with a greeting
+		reply := &pb.HelloReply{
+			Message: fmt.Sprintf("Hello %s!", req.GetName()),
+			Index:   msgNum - 1,
+		}
+		if err := stream.Send(reply); err != nil {
+			log.Printf("Chat: error sending reply: %v", err)
+			return err
+		}
+		log.Printf("Chat: sent reply %d", msgNum)
+	}
+}
+
 func main() {
 	flag.Parse()
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))

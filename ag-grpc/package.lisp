@@ -68,6 +68,14 @@
    #:client-stream-closed-p
    #:with-client-stream
 
+   ;; Bidirectional streaming
+   #:grpc-bidi-stream
+   #:call-bidirectional-streaming
+   #:stream-close-send
+   #:bidi-stream-send-closed-p
+   #:bidi-stream-recv-finished-p
+   #:do-bidi-recv
+
    ;; Conditions
    #:grpc-error
    #:grpc-status-error))

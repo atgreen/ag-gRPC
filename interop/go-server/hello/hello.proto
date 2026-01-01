@@ -28,4 +28,7 @@ service Greeter {
 
   // Client streaming RPC - receives multiple requests, returns a summary
   rpc CollectHellos (stream HelloRequest) returns (HelloSummary);
+
+  // Bidirectional streaming RPC - echo chat
+  rpc Chat (stream HelloRequest) returns (stream HelloReply);
 }

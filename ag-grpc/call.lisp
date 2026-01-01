@@ -216,10 +216,13 @@ Returns a grpc-server-stream object. Use stream-read-message to read responses."
                    :call call
                    :response-type response-type)))
 
-(defun stream-read-message (server-stream)
-  "Read the next message from a server stream.
+(defgeneric stream-read-message (stream)
+  (:documentation "Read the next message from a streaming RPC.
 Returns the deserialized message, or NIL if the stream is finished.
-When the stream ends, also sets stream-status."
+When the stream ends, also sets stream-status."))
+
+(defmethod stream-read-message ((server-stream grpc-server-stream))
+  "Read the next message from a server stream."
   (when (stream-finished-p server-stream)
     (return-from stream-read-message nil))
   (let* ((call (stream-call server-stream))
@@ -364,10 +367,13 @@ then stream-close-and-recv to finish and get the response."
                    :stream-id stream-id
                    :response-type response-type)))
 
-(defun stream-send (client-stream message)
-  "Send a message on a client stream.
+(defgeneric stream-send (stream message)
+  (:documentation "Send a message on a streaming RPC.
 MESSAGE can be a proto-message or a byte vector.
-Returns the client-stream for chaining."
+Returns the stream for chaining."))
+
+(defmethod stream-send ((client-stream grpc-client-stream) message)
+  "Send a message on a client stream."
   (when (client-stream-closed-p client-stream)
     (error "Cannot send on closed client stream"))
   (let ((message-bytes (if (typep message 'vector)
@@ -449,3 +455,194 @@ Example:
                                        :response-type ,response-type)))
      ,@body
      (stream-close-and-recv ,var)))
+
+;;;; ========================================================================
+;;;; Bidirectional Streaming RPC
+;;;; ========================================================================
+
+(defclass grpc-bidi-stream ()
+  ((call :initarg :call :accessor stream-call
+         :documentation "The underlying gRPC call")
+   (channel :initarg :channel :accessor bidi-stream-channel
+            :documentation "The gRPC channel")
+   (stream-id :initarg :stream-id :accessor bidi-stream-id
+              :documentation "HTTP/2 stream ID")
+   (response-type :initarg :response-type :accessor bidi-stream-response-type
+                  :initform nil
+                  :documentation "Response type for deserialization")
+   (buffer :initform (make-array 0 :element-type '(unsigned-byte 8)
+                                   :adjustable t :fill-pointer 0)
+           :accessor bidi-stream-buffer
+           :documentation "Buffer for partial messages")
+   (send-closed-p :initform nil :accessor bidi-stream-send-closed-p
+                  :documentation "True when client has finished sending")
+   (recv-finished-p :initform nil :accessor bidi-stream-recv-finished-p
+                    :documentation "True when server stream is complete")
+   (status :initform nil :accessor stream-status
+           :documentation "Final gRPC status (set when stream ends)"))
+  (:documentation "Represents a bidirectional streaming RPC"))
+
+(defun call-bidirectional-streaming (channel method &key metadata timeout response-type)
+  "Initiate a bidirectional streaming RPC call.
+CHANNEL - The gRPC channel to use
+METHOD - The method path (e.g., \"/package.Service/Chat\")
+METADATA - Optional call metadata
+TIMEOUT - Optional timeout in seconds (overrides channel default)
+RESPONSE-TYPE - Response type symbol for deserialization
+
+Returns a grpc-bidi-stream object. Use stream-send to send messages,
+stream-read-message to receive messages, and stream-close-send when done sending."
+  (ensure-connected channel)
+  (let* ((stream (channel-new-stream channel))
+         (stream-id (ag-http2:stream-id stream))
+         (call (make-instance 'grpc-call
+                              :channel channel
+                              :method method
+                              :stream-id stream-id
+                              :request-metadata metadata)))
+    ;; Send request headers (NOT end-stream, we're going to send data)
+    (channel-send-headers channel stream-id method
+                          :metadata metadata
+                          :timeout timeout
+                          :end-stream nil)
+    ;; Return the bidi stream object
+    (make-instance 'grpc-bidi-stream
+                   :call call
+                   :channel channel
+                   :stream-id stream-id
+                   :response-type response-type)))
+
+(defmethod stream-send ((bidi-stream grpc-bidi-stream) message)
+  "Send a message on a bidirectional stream.
+MESSAGE can be a proto-message or a byte vector.
+Returns the bidi-stream for chaining."
+  (when (bidi-stream-send-closed-p bidi-stream)
+    (error "Cannot send on closed stream"))
+  (let ((message-bytes (if (typep message 'vector)
+                           message
+                           (ag-proto:serialize-to-bytes message))))
+    (channel-send-message (bidi-stream-channel bidi-stream)
+                          (bidi-stream-id bidi-stream)
+                          message-bytes
+                          :end-stream nil))
+  bidi-stream)
+
+(defun stream-close-send (bidi-stream)
+  "Close the send side of a bidirectional stream.
+After this, no more messages can be sent, but messages can still be received.
+Returns the bidi-stream."
+  (when (bidi-stream-send-closed-p bidi-stream)
+    (return-from stream-close-send bidi-stream))
+  (setf (bidi-stream-send-closed-p bidi-stream) t)
+  (let* ((channel (bidi-stream-channel bidi-stream))
+         (stream-id (bidi-stream-id bidi-stream))
+         (conn (channel-connection channel)))
+    ;; Send empty DATA frame with END_STREAM to signal we're done sending
+    (ag-http2:connection-send-data conn stream-id
+                                   (make-array 0 :element-type '(unsigned-byte 8))
+                                   :end-stream t))
+  bidi-stream)
+
+(defmethod stream-read-message ((bidi-stream grpc-bidi-stream))
+  "Read the next message from a bidirectional stream.
+Returns the deserialized message, or NIL if the stream is finished.
+When the stream ends, also sets stream-status."
+  (when (bidi-stream-recv-finished-p bidi-stream)
+    (return-from stream-read-message nil))
+  (let* ((call (stream-call bidi-stream))
+         (channel (bidi-stream-channel bidi-stream))
+         (stream-id (bidi-stream-id bidi-stream))
+         (conn (channel-connection channel))
+         (h2-stream (ag-http2::multiplexer-get-stream
+                     (ag-http2::connection-multiplexer conn)
+                     stream-id))
+         (buffer (bidi-stream-buffer bidi-stream)))
+    ;; First time reading: check for response headers
+    (unless (call-response-headers call)
+      (setf (call-response-headers call)
+            (channel-receive-headers channel stream-id))
+      ;; Check initial response status
+      (let ((status-header (assoc :status (call-response-headers call))))
+        (unless (and status-header (string= (cdr status-header) "200"))
+          (setf (stream-status bidi-stream) +grpc-status-unknown+)
+          (setf (bidi-stream-recv-finished-p bidi-stream) t)
+          (return-from stream-read-message nil))))
+    ;; Try to decode a message from the buffer first
+    (multiple-value-bind (data compressed consumed)
+        (decode-grpc-message buffer 0)
+      (declare (ignore compressed))
+      (when data
+        ;; Got a complete message from buffer
+        (let ((remaining (subseq buffer consumed)))
+          (setf (fill-pointer buffer) 0)
+          (loop for byte across remaining
+                do (vector-push-extend byte buffer)))
+        (return-from stream-read-message
+          (if (bidi-stream-response-type bidi-stream)
+              (ag-proto:deserialize-from-bytes (bidi-stream-response-type bidi-stream) data)
+              data))))
+    ;; Need to read more data
+    (loop
+      ;; Check if stream can still receive
+      (unless (ag-http2::stream-can-recv-p h2-stream)
+        ;; Stream is done, extract final status from trailers
+        (let ((trailers (ag-http2::stream-trailers h2-stream)))
+          (setf (call-response-trailers call) trailers)
+          (let ((status-trailer (assoc "grpc-status" trailers :test #'string-equal)))
+            (setf (stream-status bidi-stream)
+                  (if status-trailer
+                      (parse-integer (cdr status-trailer))
+                      +grpc-status-ok+))
+            (setf (call-status call) (stream-status bidi-stream)))
+          ;; Check for any remaining data in buffer
+          (multiple-value-bind (data compressed consumed)
+              (decode-grpc-message buffer 0)
+            (declare (ignore compressed consumed))
+            (when data
+              (return-from stream-read-message
+                (if (bidi-stream-response-type bidi-stream)
+                    (ag-proto:deserialize-from-bytes (bidi-stream-response-type bidi-stream) data)
+                    data))))
+          ;; Mark stream as finished
+          (setf (bidi-stream-recv-finished-p bidi-stream) t)
+          ;; Signal error if not OK
+          (unless (grpc-status-ok-p (stream-status bidi-stream))
+            (error 'grpc-status-error
+                   :code (stream-status bidi-stream)
+                   :message (call-status-message call)))
+          (return-from stream-read-message nil)))
+      ;; Read a frame
+      (ag-http2:connection-read-frame conn)
+      ;; Copy any new data to our buffer
+      (let ((new-data (ag-http2::stream-consume-data h2-stream)))
+        (loop for byte across new-data
+              do (vector-push-extend byte buffer)))
+      ;; Try to decode a message
+      (multiple-value-bind (data compressed consumed)
+          (decode-grpc-message buffer 0)
+        (declare (ignore compressed))
+        (when data
+          ;; Got a complete message
+          (let ((remaining (subseq buffer consumed)))
+            (setf (fill-pointer buffer) 0)
+            (loop for byte across remaining
+                  do (vector-push-extend byte buffer)))
+          (return-from stream-read-message
+            (if (bidi-stream-response-type bidi-stream)
+                (ag-proto:deserialize-from-bytes (bidi-stream-response-type bidi-stream) data)
+                data)))))))
+
+(defmacro do-bidi-recv ((var bidi-stream &optional result) &body body)
+  "Iterate over all received messages in a bidirectional stream.
+VAR is bound to each message in turn.
+Returns RESULT (default NIL) when the stream is exhausted.
+
+Example:
+  (do-bidi-recv (msg stream)
+    (format t \"Got: ~A~%\" msg))"
+  (let ((stream-var (gensym "STREAM")))
+    `(let ((,stream-var ,bidi-stream))
+       (loop for ,var = (stream-read-message ,stream-var)
+             while ,var
+             do (progn ,@body)
+             finally (return ,result)))))
