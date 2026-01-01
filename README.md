@@ -4,11 +4,11 @@ A pure Common Lisp implementation of gRPC, Protocol Buffers, and HTTP/2.
 
 ## Overview
 
-ag-gRPC provides a complete gRPC client stack written entirely in portable Common Lisp. It includes:
+ag-gRPC provides a complete gRPC stack (client and server) written entirely in portable Common Lisp. It includes:
 
 - **ag-proto** - Protocol Buffers (Proto3) implementation with .proto file parsing and code generation
 - **ag-http2** - HTTP/2 protocol implementation (RFC 7540) with HPACK header compression (RFC 7541)
-- **ag-grpc** - gRPC protocol implementation for unary RPCs
+- **ag-grpc** - gRPC protocol implementation for client and server
 
 ## Features
 
@@ -23,6 +23,7 @@ ag-gRPC provides a complete gRPC client stack written entirely in portable Commo
 - **Stream collectors**: `collect-stream-messages`, `map-stream-messages`, `reduce-stream-messages`
 - Gray stream integration for composable I/O
 - Optional TLS/SSL support (via cl+ssl)
+- **gRPC Server**: handler registration, request context, streaming support
 - Interoperability tested against Go gRPC servers
 
 ## Installation
@@ -343,6 +344,113 @@ ag-gRPC supports bidirectional streaming where both client and server can send m
       do (process msg))
 ```
 
+## gRPC Server
+
+ag-gRPC includes full server-side support for hosting gRPC services:
+
+### Basic Server Setup
+
+```lisp
+;; Define a handler function
+(defun handle-say-hello (request ctx)
+  "Handler for SayHello RPC"
+  (make-instance 'hello-reply
+    :message (format nil "Hello, ~A!" (name request))))
+
+;; Create and start server
+(defvar *server* (ag-grpc:make-grpc-server 50051))
+
+;; Register handler
+(ag-grpc:server-register-handler *server* "/hello.Greeter/SayHello"
+                                  #'handle-say-hello
+                                  :request-type 'hello-request
+                                  :response-type 'hello-reply)
+
+;; Start server (blocks)
+(ag-grpc:server-start *server*)
+```
+
+### Using with-grpc-server
+
+```lisp
+;; Automatic cleanup with macro
+(ag-grpc:with-grpc-server (server 50051)
+  (ag-grpc:server-register-handler server "/hello.Greeter/SayHello"
+                                    #'handle-say-hello
+                                    :request-type 'hello-request
+                                    :response-type 'hello-reply)
+  (ag-grpc:server-start server))
+```
+
+### Server Streaming Handler
+
+```lisp
+(defun handle-list-features (request ctx stream)
+  "Server streaming: send multiple responses"
+  (dolist (feature (find-features-in-area request))
+    (ag-grpc:stream-send stream feature)))
+
+(ag-grpc:server-register-handler server "/route.RouteGuide/ListFeatures"
+                                  #'handle-list-features
+                                  :request-type 'rectangle
+                                  :response-type 'feature
+                                  :server-streaming t)
+```
+
+### Client Streaming Handler
+
+```lisp
+(defun handle-record-route (ctx stream)
+  "Client streaming: receive multiple requests, return single response"
+  (let ((points nil))
+    (ag-grpc:do-stream-recv (point stream)
+      (push point points))
+    (make-instance 'route-summary
+      :point-count (length points))))
+
+(ag-grpc:server-register-handler server "/route.RouteGuide/RecordRoute"
+                                  #'handle-record-route
+                                  :request-type 'point
+                                  :response-type 'route-summary
+                                  :client-streaming t)
+```
+
+### Bidirectional Streaming Handler
+
+```lisp
+(defun handle-route-chat (ctx stream)
+  "Bidi streaming: interleave send and receive"
+  (ag-grpc:do-stream-recv (note stream)
+    ;; Echo back with additional info
+    (ag-grpc:stream-send stream
+      (make-instance 'route-note
+        :message (format nil "Got: ~A" (message note))))))
+
+(ag-grpc:server-register-handler server "/route.RouteGuide/RouteChat"
+                                  #'handle-route-chat
+                                  :request-type 'route-note
+                                  :response-type 'route-note
+                                  :client-streaming t
+                                  :server-streaming t)
+```
+
+### Accessing Request Context
+
+```lisp
+(defun handle-authenticated-rpc (request ctx)
+  ;; Access request metadata
+  (let ((auth-token (ag-grpc:context-metadata ctx "authorization")))
+    (unless (valid-token-p auth-token)
+      (error 'ag-grpc:grpc-status-error
+             :code ag-grpc:+grpc-status-unauthenticated+
+             :message "Invalid token")))
+  ;; Set response metadata
+  (ag-grpc:context-set-trailing-metadata ctx
+    (ag-grpc:make-grpc-metadata '(("x-request-id" . "12345"))))
+  ;; Return response
+  (make-response request))
+```
+
 ## TLS/SSL Support
 
 ag-gRPC supports optional TLS encryption via [cl+ssl](https://github.com/cl-plus-ssl/cl-plus-ssl).
@@ -412,12 +520,10 @@ gRPC protocol:
 - gRPC message framing (5-byte header)
 - Metadata handling with CLOS wrapper (`grpc-metadata` class)
 - Status codes per gRPC specification
-- Unary RPC calls
-- **Server streaming RPC** with iterator/callback support
-- **Client streaming RPC** with stream-send/close-and-recv pattern
-- **Bidirectional streaming RPC** with interleaved send/receive
+- **Client**: Unary, server streaming, client streaming, and bidirectional streaming RPCs
+- **Server**: Handler registration, request context, all streaming patterns
 - Channel abstraction over HTTP/2 connections
-- **Convenience macros** for lifecycle management (`with-channel`, `with-call`, etc.)
+- **Convenience macros** for lifecycle management (`with-channel`, `with-call`, `with-grpc-server`)
 - **Stream collectors** for functional stream processing
 - **Response objects** with lazy metadata conversion
 
@@ -484,9 +590,9 @@ Should work on other implementations supporting usocket.
 
 Current limitations (contributions welcome!):
 
-- Client-side only (no server implementation yet)
 - No load balancing or service discovery
 - No deadline propagation
+- Server TLS not yet implemented
 
 ## License
 
