@@ -4,7 +4,7 @@
   :description "Pure Common Lisp HTTP/2 implementation (RFC 7540)"
   :author "Anthony Green <green@moxielogic.com>"
   :license "MIT"
-  :version "0.1.0"
+  :version "1.0.0"
   :serial t
   :depends-on (#:usocket)
   :pathname "ag-http2"

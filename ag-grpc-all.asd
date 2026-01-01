@@ -4,7 +4,7 @@
   :description "Complete Pure Common Lisp gRPC stack (Proto3 + HTTP/2 + gRPC)"
   :author "Anthony Green <green@moxielogic.com>"
   :license "MIT"
-  :version "0.1.0"
+  :version "1.0.0"
   :depends-on (#:ag-proto #:ag-http2 #:ag-grpc))
 
 (asdf:defsystem #:ag-grpc-all/tests
