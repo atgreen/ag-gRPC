@@ -1,0 +1,24 @@
+# Emacs
+*~
+.#*
+\#*\#
+
+# ASDF/Lisp cache
+*.fasl
+*.fas
+*.lib
+*.o
+
+# ocicl dependencies
+ocicl/
+
+# Build artifacts
+ag-protoc
+.cache/
+
+# Go build artifacts
+interop/go-server/hello-server
+
+# IDE
+.vscode/
+.idea/
