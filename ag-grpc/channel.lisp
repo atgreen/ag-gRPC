@@ -174,3 +174,12 @@ Handles messages that span multiple HTTP/2 DATA frames."
     (loop while (ag-http2:stream-can-recv-p stream)
           do (ag-http2:connection-read-frame conn))
     (ag-http2:stream-trailers stream)))
+
+(defun channel-stream-has-extra-data-p (channel stream-id)
+  "Check if the stream's data buffer has unconsumed data.
+For unary calls, this indicates multiple messages were sent which is an error."
+  (let* ((conn (channel-connection channel))
+         (stream (ag-http2:multiplexer-get-stream
+                  (ag-http2:connection-multiplexer conn)
+                  stream-id)))
+    (plusp (length (ag-http2:stream-data-buffer stream)))))

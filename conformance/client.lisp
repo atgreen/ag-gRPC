@@ -364,9 +364,12 @@ Handles edge cases where headers might be malformed."
                                   :response-headers (convert-headers headers)
                                   :response-trailers (convert-headers trailers))))
                     ;; Add payload if we have a successful response
-                    ;; The response's payload slot already contains a ConformancePayload object
+                    ;; The response's payload slot contains a ConformancePayload object
+                    ;; For empty responses, payload might be nil but we still need to return
+                    ;; an empty ConformancePayload to indicate we got a response
                     (when (and response (zerop status-code))
-                      (let ((payload (slot-value response 'conformance-proto::payload)))
+                      (let ((payload (or (slot-value response 'conformance-proto::payload)
+                                         (make-instance 'conformance-payload))))
                         (setf (slot-value result 'conformance-proto::payloads) (list payload))))
                     ;; Add error info if non-zero status
                     (when (and status-code (not (zerop status-code)))
