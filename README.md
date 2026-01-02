@@ -46,7 +46,7 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 | Cancellation | ✅ | — |
 | TLS (h2) | ✅ | — |
 | Plaintext (h2c) | ✅ | ✅ |
-| Compression (gzip) | ✅ | — |
+| Compression (gzip) | ✅ | ✅ |
 
 ## Features
 
