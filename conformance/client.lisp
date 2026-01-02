@@ -149,11 +149,13 @@ Also adds the x-test-case-name header."
                   (or (ag-grpc:call-status call) 0)
                   (ag-grpc::call-status-message call)))
       (ag-grpc:grpc-status-error (e)
-        ;; Return the error status
+        ;; Return the error status with headers and trailers
         (log-msg "gRPC status error: code=~A msg=~A"
                  (ag-grpc:grpc-status-error-code e)
                  (ag-grpc:grpc-status-error-message e))
-        (values nil nil nil
+        (values nil
+                (ag-grpc:grpc-status-error-headers e)
+                (ag-grpc:grpc-status-error-trailers e)
                 (ag-grpc:grpc-status-error-code e)
                 (ag-grpc:grpc-status-error-message e))))))
 
@@ -175,37 +177,42 @@ Also adds the x-test-case-name header."
 
 (defun convert-headers (headers)
   "Convert HTTP/2 headers to conformance Header objects.
+Combines duplicate header names into single Header objects with multiple values.
 Handles edge cases where headers might be malformed."
   (when (and headers (listp headers))
-    (loop for entry in headers
-          when (and (consp entry)
-                    ;; Skip NIL entries
-                    (car entry))
-            collect (handler-case
-                        (let* ((name (car entry))
-                               (value (cdr entry))
-                               ;; Convert keyword names to strings (e.g., :status -> ":status")
-                               (name-str (cond
-                                           ((keywordp name)
-                                            (format nil ":~(~A~)" (symbol-name name)))
-                                           ((stringp name)
-                                            (string-downcase name))
-                                           (t
-                                            (princ-to-string name))))
-                               ;; Ensure value is always a string
-                               (value-str (cond
-                                            ((stringp value) value)
-                                            ((null value) "")
-                                            (t (princ-to-string value)))))
-                          (make-instance 'header
-                            :name name-str
-                            :value (list value-str)))
-                      (error (e)
-                        ;; Log and skip malformed entries
-                        (log-msg "Warning: skipping malformed header entry ~A: ~A" entry e)
-                        nil))
-          into result
-          finally (return (remove nil result)))))
+    ;; First pass: group values by header name
+    (let ((header-values (make-hash-table :test #'equal)))
+      (loop for entry in headers
+            when (and (consp entry) (car entry))
+              do (handler-case
+                     (let* ((name (car entry))
+                            (value (cdr entry))
+                            ;; Convert keyword names to strings (e.g., :status -> ":status")
+                            (name-str (cond
+                                        ((keywordp name)
+                                         (format nil ":~(~A~)" (symbol-name name)))
+                                        ((stringp name)
+                                         (string-downcase name))
+                                        (t
+                                         (princ-to-string name))))
+                            ;; Ensure value is always a string
+                            (value-str (cond
+                                         ((stringp value) value)
+                                         ((null value) "")
+                                         (t (princ-to-string value)))))
+                       ;; Append to existing values or create new entry
+                       (push value-str (gethash name-str header-values)))
+                   (error (e)
+                     (log-msg "Warning: skipping malformed header entry ~A: ~A" entry e))))
+      ;; Second pass: create Header objects with all values (in original order)
+      (let ((result nil))
+        (maphash (lambda (name values)
+                   (push (make-instance 'header
+                           :name name
+                           :value (nreverse values))
+                         result))
+                 header-values)
+        result))))
 
 (defun execute-request (request)
   "Execute a conformance test request and return a response."

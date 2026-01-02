@@ -60,10 +60,9 @@ The response is available via (call-response call)."
                              request
                              (ag-proto:serialize-to-bytes request))))
       (channel-send-message channel stream-id request-bytes :end-stream t))
-    ;; Receive response headers (decode binary metadata)
+    ;; Receive response headers
     (let ((raw-headers (channel-receive-headers channel stream-id)))
-      (setf (call-response-headers call)
-            (append raw-headers (decode-metadata-headers raw-headers))))
+      (setf (call-response-headers call) raw-headers))
     ;; Check initial response status
     (let ((status-header (assoc :status (call-response-headers call))))
       (unless (and status-header (string= (cdr status-header) "200"))
@@ -84,7 +83,9 @@ The response is available via (call-response call)."
         (unless (grpc-status-ok-p (call-status call))
           (error 'grpc-status-error
                  :code (call-status call)
-                 :message (call-status-message call)))
+                 :message (call-status-message call)
+                 :headers (call-response-headers call)
+                 :trailers (call-response-headers call)))  ; trailers-only: trailers are in headers
         (return-from call-unary call)))
     ;; Receive response message
     (let ((response-data (channel-receive-message channel stream-id)))
@@ -93,10 +94,9 @@ The response is available via (call-response call)."
               (if response-type
                   (ag-proto:deserialize-from-bytes response-type response-data)
                   response-data))))
-    ;; Receive trailers (contains gRPC status, decode binary metadata)
+    ;; Receive trailers (contains gRPC status)
     (let ((raw-trailers (channel-receive-trailers channel stream-id)))
-      (setf (call-response-trailers call)
-            (append raw-trailers (decode-metadata-headers raw-trailers))))
+      (setf (call-response-trailers call) raw-trailers))
     ;; Extract status from trailers
     (let ((status-trailer (assoc "grpc-status" (call-response-trailers call)
                                  :test #'string-equal)))
@@ -113,7 +113,9 @@ The response is available via (call-response call)."
     (unless (grpc-status-ok-p (call-status call))
       (error 'grpc-status-error
              :code (call-status call)
-             :message (call-status-message call)))
+             :message (call-status-message call)
+             :headers (call-response-headers call)
+             :trailers (call-response-trailers call)))
     call))
 
 (defun ensure-connected (channel)
@@ -221,10 +223,9 @@ Returns a grpc-server-stream object. Use stream-read-message to read responses."
                              request
                              (ag-proto:serialize-to-bytes request))))
       (channel-send-message channel stream-id request-bytes :end-stream t))
-    ;; Receive response headers (decode binary metadata)
+    ;; Receive response headers
     (let ((raw-headers (channel-receive-headers channel stream-id)))
-      (setf (call-response-headers call)
-            (append raw-headers (decode-metadata-headers raw-headers))))
+      (setf (call-response-headers call) raw-headers))
     ;; Check initial response status
     (let ((status-header (assoc :status (call-response-headers call))))
       (unless (and status-header (string= (cdr status-header) "200"))
@@ -271,9 +272,8 @@ When the stream ends, also sets stream-status."))
     (loop
       ;; Check if stream can still receive
       (unless (ag-http2:stream-can-recv-p h2-stream)
-        ;; Stream is done, extract final status from trailers (decode binary metadata)
-        (let* ((raw-trailers (ag-http2:stream-trailers h2-stream))
-               (trailers (append raw-trailers (decode-metadata-headers raw-trailers))))
+        ;; Stream is done, extract final status from trailers
+        (let* ((trailers (ag-http2:stream-trailers h2-stream)))
           (setf (call-response-trailers call) trailers)
           (let ((status-trailer (assoc "grpc-status" trailers :test #'string-equal)))
             (setf (stream-status server-stream)
@@ -421,10 +421,9 @@ Returns (values response status) where response is the deserialized message."
     (ag-http2:connection-send-data conn stream-id
                                    (make-array 0 :element-type '(unsigned-byte 8))
                                    :end-stream t)
-    ;; Receive response headers (decode binary metadata)
+    ;; Receive response headers
     (let ((raw-headers (channel-receive-headers channel stream-id)))
-      (setf (call-response-headers call)
-            (append raw-headers (decode-metadata-headers raw-headers))))
+      (setf (call-response-headers call) raw-headers))
     ;; Check initial response status
     (let ((status-header (assoc :status (call-response-headers call))))
       (unless (and status-header (string= (cdr status-header) "200"))
@@ -439,10 +438,9 @@ Returns (values response status) where response is the deserialized message."
                   (ag-proto:deserialize-from-bytes
                    (client-stream-response-type client-stream) response-data)
                   response-data))))
-    ;; Receive trailers (contains gRPC status, decode binary metadata)
+    ;; Receive trailers (contains gRPC status)
     (let ((raw-trailers (channel-receive-trailers channel stream-id)))
-      (setf (call-response-trailers call)
-            (append raw-trailers (decode-metadata-headers raw-trailers))))
+      (setf (call-response-trailers call) raw-trailers))
     ;; Extract status from trailers
     (let ((status-trailer (assoc "grpc-status" (call-response-trailers call)
                                  :test #'string-equal)))
@@ -580,11 +578,10 @@ When the stream ends, also sets stream-status."
                      (ag-http2:connection-multiplexer conn)
                      stream-id))
          (buffer (bidi-stream-buffer bidi-stream)))
-    ;; First time reading: check for response headers (decode binary metadata)
+    ;; First time reading: check for response headers
     (unless (call-response-headers call)
       (let ((raw-headers (channel-receive-headers channel stream-id)))
-        (setf (call-response-headers call)
-              (append raw-headers (decode-metadata-headers raw-headers))))
+        (setf (call-response-headers call) raw-headers))
       ;; Check initial response status
       (let ((status-header (assoc :status (call-response-headers call))))
         (unless (and status-header (string= (cdr status-header) "200"))
@@ -609,9 +606,8 @@ When the stream ends, also sets stream-status."
     (loop
       ;; Check if stream can still receive
       (unless (ag-http2:stream-can-recv-p h2-stream)
-        ;; Stream is done, extract final status from trailers (decode binary metadata)
-        (let* ((raw-trailers (ag-http2:stream-trailers h2-stream))
-               (trailers (append raw-trailers (decode-metadata-headers raw-trailers))))
+        ;; Stream is done, extract final status from trailers
+        (let* ((trailers (ag-http2:stream-trailers h2-stream)))
           (setf (call-response-trailers call) trailers)
           (let ((status-trailer (assoc "grpc-status" trailers :test #'string-equal)))
             (setf (stream-status bidi-stream)

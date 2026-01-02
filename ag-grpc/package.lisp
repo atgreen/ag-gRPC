@@ -128,6 +128,8 @@
    #:grpc-status-error-code
    #:grpc-status-error-message
    #:grpc-status-error-details
+   #:grpc-status-error-headers
+   #:grpc-status-error-trailers
 
    ;; Server
    #:grpc-server

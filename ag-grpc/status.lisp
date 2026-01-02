@@ -110,7 +110,13 @@ for the operation.")
             :documentation "Error message")
    (details :initarg :details :reader grpc-status-error-details
             :initform nil
-            :documentation "Additional error details"))
+            :documentation "Additional error details")
+   (headers :initarg :headers :reader grpc-status-error-headers
+            :initform nil
+            :documentation "Response headers")
+   (trailers :initarg :trailers :reader grpc-status-error-trailers
+             :initform nil
+             :documentation "Response trailers"))
   (:report (lambda (c s)
              (format s "gRPC error ~A (~A)~@[: ~A~]"
                      (grpc-status-error-code c)
