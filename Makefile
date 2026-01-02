@@ -1,4 +1,4 @@
-.PHONY: all clean lint test check cli interop interop-go-server
+.PHONY: all clean lint test check cli interop interop-go-server conformance
 
 all: cli
 
@@ -37,3 +37,18 @@ interop: interop-go-server
 	trap 'kill $$server_pid >/dev/null 2>&1 || true' EXIT; \
 	sleep 0.2; \
 	sbcl --script interop/test-client.lisp
+
+conformance: interop/interop-server
+	@echo "Running gRPC conformance tests..."
+	@cd interop && ./interop-server & server_pid=$$!; \
+	trap 'kill $$server_pid >/dev/null 2>&1 || true' EXIT; \
+	sleep 0.5; \
+	sbcl --non-interactive \
+	     --eval "(require 'asdf)" \
+	     --eval "(asdf:initialize-source-registry (list :source-registry :inherit-configuration (list :directory (truename \"$(CURDIR)\")) (list :tree (merge-pathnames \"ocicl/\" (truename \"$(CURDIR)\")))))" \
+	     --eval "(asdf:load-system :ag-grpc)" \
+	     --load interop/interop.lisp \
+	     --load interop/run-tests.lisp
+
+interop/interop-server: interop/server.go interop/pb/*.go
+	cd interop && go build -o interop-server server.go

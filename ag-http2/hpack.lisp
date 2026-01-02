@@ -472,14 +472,17 @@
 
 (defun hpack-decode-integer (prefix-bits input pos)
   "Decode an integer with the given prefix size. Returns (values int new-pos)"
-  (let* ((max-prefix (1- (ash 1 prefix-bits)))
+  (let* ((input-len (length input))
+         (max-prefix (1- (ash 1 prefix-bits)))
          (byte (aref input pos))
          (value (logand byte max-prefix)))
     (if (< value max-prefix)
         (values value (1+ pos))
         (let ((m 0))
           (loop for p from (1+ pos)
-                for b = (aref input p)
+                for b = (if (>= p input-len)
+                            (error "HPACK integer extends beyond input bounds")
+                            (aref input p))
                 do (incf value (ash (logand b 127) m))
                    (incf m 7)
                 when (zerop (logand b 128))
@@ -503,11 +506,15 @@
   (let ((huffman-p (logbitp 7 (aref input pos))))
     (multiple-value-bind (len new-pos)
         (hpack-decode-integer 7 input pos)
-      (let ((bytes (subseq input new-pos (+ new-pos len))))
-        (values (if huffman-p
-                    (huffman-decode bytes)
-                    (ag-proto::utf8-to-string bytes))
-                (+ new-pos len))))))
+      (let ((end-pos (+ new-pos len)))
+        (when (> end-pos (length input))
+          (error "HPACK string length ~D exceeds input bounds (pos=~D, input-length=~D, byte-at-pos=~D, huffman=~A)"
+                 len new-pos (length input) (aref input pos) huffman-p))
+        (let ((bytes (subseq input new-pos end-pos)))
+          (values (if huffman-p
+                      (huffman-decode bytes)
+                      (ag-proto::utf8-to-string bytes))
+                  end-pos))))))
 
 ;;;; ========================================================================
 ;;;; Header Encoding/Decoding
@@ -570,20 +577,31 @@
     (loop while (< pos len)
           do (let ((byte (aref bytes pos)))
                (cond
-                 ;; Indexed header field
+                 ;; Indexed header field (1xxxxxxx)
                  ((logbitp 7 byte)
                   (multiple-value-bind (index new-pos)
                       (hpack-decode-integer 7 bytes pos)
                     (push (hpack-get-indexed decoder index) headers)
                     (setf pos new-pos)))
-                 ;; Literal header field with incremental indexing
+                 ;; Literal header field with incremental indexing (01xxxxxx)
                  ((= (logand byte #xc0) #x40)
                   (multiple-value-bind (name value new-pos)
                       (hpack-decode-literal bytes pos 6)
                     (push (cons name value) headers)
                     (dynamic-table-add (decoder-dynamic-table decoder) name value)
                     (setf pos new-pos)))
-                 ;; Literal without indexing or never indexed
+                 ;; Dynamic table size update (001xxxxx)
+                 ((= (logand byte #xe0) #x20)
+                  (multiple-value-bind (new-size new-pos)
+                      (hpack-decode-integer 5 bytes pos)
+                    ;; Update the dynamic table max size
+                    (setf (dynamic-table-max-size (decoder-dynamic-table decoder)) new-size)
+                    ;; Evict entries if needed
+                    (let ((table (decoder-dynamic-table decoder)))
+                      (loop while (> (dynamic-table-size table) new-size)
+                            do (dynamic-table-evict table)))
+                    (setf pos new-pos)))
+                 ;; Literal without indexing (0000xxxx) or never indexed (0001xxxx)
                  (t
                   (multiple-value-bind (name value new-pos)
                       (hpack-decode-literal bytes pos 4)

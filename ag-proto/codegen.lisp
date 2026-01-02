@@ -24,6 +24,40 @@ length-delimited (message).")
        (stringp type-name)
        (gethash type-name *known-enum-types*)))
 
+(defun lisp-name (name &optional suffix)
+  "Convert a proto name to a Lisp symbol name.
+   FooBar becomes FOO-BAR, TLSCreds becomes TLS-CREDS, with optional SUFFIX appended."
+  (with-output-to-string (s)
+    (loop for i from 0 below (length name)
+          for char = (char name i)
+          for prev-char = (if (> i 0) (char name (1- i)) nil)
+          for next-char = (if (< (1+ i) (length name)) (char name (1+ i)) nil)
+          do (cond
+               ;; Insert hyphen before uppercase if previous was lowercase
+               ((and prev-char
+                     (upper-case-p char)
+                     (lower-case-p prev-char))
+                (write-char #\- s)
+                (write-char (char-upcase char) s))
+               ;; Insert hyphen before uppercase that starts a new word
+               ;; (uppercase followed by lowercase, after another uppercase)
+               ;; e.g., TLSCreds -> TLS-CREDS at 'C' (prev=S upper, curr=C upper, next=r lower)
+               ((and prev-char
+                     (upper-case-p prev-char)
+                     (upper-case-p char)
+                     next-char
+                     (lower-case-p next-char))
+                (write-char #\- s)
+                (write-char (char-upcase char) s))
+               ;; Convert underscore to hyphen
+               ((char= char #\_)
+                (write-char #\- s))
+               ;; Normal character
+               (t
+                (write-char (char-upcase char) s))))
+    (when suffix
+      (write-string suffix s))))
+
 ;;; Type mapping
 
 (defun proto-type-to-lisp-type (proto-type)
@@ -49,7 +83,7 @@ length-delimited (message).")
       :fixed32 :fixed64 :sfixed32 :sfixed64 :enum) 0)
     (:bool nil)
     (:string "")
-    (:bytes (make-array 0 :element-type '(unsigned-byte 8)))
+    (:bytes '(make-array 0 :element-type '(unsigned-byte 8)))
     (t nil)))  ; Message types default to nil
 
 (defparameter *cl-reserved-names*
@@ -74,6 +108,15 @@ length-delimited (message).")
     (if (member upname *cl-reserved-names* :test #'string=)
         (intern (concatenate 'string "PROTO-" upname) package)
         (intern upname package))))
+
+(defun safe-class-name (name package)
+  "Generate a safe class name, prefixing if it conflicts with CL symbols.
+NAME should already be in LISP-NAME format (e.g., FOO-BAR).
+If PACKAGE is nil, interns in the current package (*PACKAGE*)."
+  (let ((target-package (or package *package*)))
+    (if (member name *cl-reserved-names* :test #'string=)
+        (intern (concatenate 'string "PROTO-" name) target-package)
+        (intern name target-package))))
 
 (defun field-name-to-slot-name (name)
   "Convert a field name to a slot name symbol, prefixing with PROTO- if it conflicts with CL"
@@ -287,9 +330,17 @@ ONEOFS is the list of oneof descriptors for the message."
      `(read-length-delimited ,buffer-var))
     (t
      ;; Message type - deserialize recursively
-     (let ((type-class (if (keywordp type)
-                           type
-                           (intern (string-upcase type)))))
+     ;; Strip package prefix (e.g., "google.protobuf.Any" -> "Any")
+     ;; and convert to kebab-case (e.g., "UnaryRequest" -> "UNARY-REQUEST")
+     ;; Use safe-class-name to handle reserved symbols like ERROR
+     (let* ((simple-name (if (keywordp type)
+                             (symbol-name type)
+                             (let ((pos (position #\. type :from-end t)))
+                               (if pos
+                                   (subseq type (1+ pos))
+                                   type))))
+            (lisp-name-str (lisp-name simple-name))
+            (type-class (safe-class-name lisp-name-str nil)))
        `(let ((data (read-length-delimited ,buffer-var)))
           (deserialize-from-bytes ',type-class data))))))
 
@@ -410,7 +461,8 @@ ONEOFS is the list of oneof descriptors for the message."
 (defun generate-class-definition (message-desc &optional package)
   "Generate a CLOS class definition from a message descriptor"
   (let* ((name (proto-message-name message-desc))
-         (class-name (intern (string-upcase name) package))
+         (lisp-name-str (lisp-name name))
+         (class-name (safe-class-name lisp-name-str package))
          (fields (proto-message-fields message-desc))
          (oneofs (proto-message-oneofs message-desc))
          (field-slots (mapcar (lambda (f) (generate-slot-definition f package)) fields))
@@ -436,7 +488,8 @@ ONEOFS is the list of oneof descriptors for the message."
 (defun generate-serializer (message-desc &optional package)
   "Generate a serialize-to-bytes method for a message"
   (let* ((name (proto-message-name message-desc))
-         (class-name (intern (string-upcase name) package))
+         (lisp-name-str (lisp-name name))
+         (class-name (safe-class-name lisp-name-str package))
          (fields (proto-message-fields message-desc))
          (oneofs (proto-message-oneofs message-desc))
          (field-serializers (mapcar (lambda (f) (generate-field-serializer f oneofs)) fields)))
@@ -449,7 +502,8 @@ ONEOFS is the list of oneof descriptors for the message."
 (defun generate-deserializer (message-desc &optional package)
   "Generate a deserialize-from-bytes method for a message"
   (let* ((name (proto-message-name message-desc))
-         (class-name (intern (string-upcase name) package))
+         (lisp-name-str (lisp-name name))
+         (class-name (safe-class-name lisp-name-str package))
          (fields (proto-message-fields message-desc))
          (oneofs (proto-message-oneofs message-desc))
          (field-cases (mapcar (lambda (f) (generate-field-deserializer-case f class-name oneofs))
@@ -595,29 +649,6 @@ Returns the list of generated forms."
 ;;;; Each service becomes a stub class with methods for each RPC.
 ;;;; ========================================================================
 
-(defun lisp-name (name &optional suffix)
-  "Convert a proto name to a Lisp symbol name.
-   FooBar becomes FOO-BAR, with optional SUFFIX appended."
-  (with-output-to-string (s)
-    (loop for i from 0 below (length name)
-          for char = (char name i)
-          for prev-char = (if (> i 0) (char name (1- i)) nil)
-          do (cond
-               ;; Insert hyphen before uppercase if previous was lowercase
-               ((and prev-char
-                     (upper-case-p char)
-                     (lower-case-p prev-char))
-                (write-char #\- s)
-                (write-char (char-upcase char) s))
-               ;; Convert underscore to hyphen
-               ((char= char #\_)
-                (write-char #\- s))
-               ;; Normal character
-               (t
-                (write-char (char-upcase char) s))))
-    (when suffix
-      (write-string suffix s))))
-
 (defun generate-stub-class (service-desc package)
   "Generate a stub class definition for a service"
   (let* ((name (proto-service-name service-desc))
@@ -660,7 +691,7 @@ stream-read-message to receive messages, and stream-close-send when done sending
           (let* ((grpc-pkg (find-package :ag-grpc))
                  (call-fn (and grpc-pkg (symbol-function (find-symbol "CALL-BIDIRECTIONAL-STREAMING" grpc-pkg)))))
             (unless call-fn
-              (error "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
+              (cl:error "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
             (funcall call-fn
                      (stub-channel stub)
                      ,method-path
@@ -676,7 +707,7 @@ then stream-close-and-recv to get the response." service-name method-name)
           (let* ((grpc-pkg (find-package :ag-grpc))
                  (call-fn (and grpc-pkg (symbol-function (find-symbol "CALL-CLIENT-STREAMING" grpc-pkg)))))
             (unless call-fn
-              (error "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
+              (cl:error "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
             (funcall call-fn
                      (stub-channel stub)
                      ,method-path
@@ -691,7 +722,7 @@ Returns a grpc-server-stream. Use stream-read-message or do-stream-messages to c
           (let* ((grpc-pkg (find-package :ag-grpc))
                  (call-fn (and grpc-pkg (symbol-function (find-symbol "CALL-SERVER-STREAMING" grpc-pkg)))))
             (unless call-fn
-              (error "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
+              (cl:error "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
             (funcall call-fn
                      (stub-channel stub)
                      ,method-path
@@ -708,7 +739,7 @@ Returns a grpc-server-stream. Use stream-read-message or do-stream-messages to c
                  (response-fn (and grpc-pkg (fdefinition (find-symbol "CALL-RESPONSE" grpc-pkg))))
                  (status-fn (and grpc-pkg (fdefinition (find-symbol "CALL-STATUS" grpc-pkg)))))
             (unless call-fn
-              (error "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
+              (cl:error "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
             (let ((call (funcall call-fn
                                  (stub-channel stub)
                                  ,method-path

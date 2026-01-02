@@ -18,6 +18,7 @@
    #:priority-frame
    #:rst-stream-frame
    #:settings-frame
+   #:settings-frame-ack-p
    #:push-promise-frame
    #:ping-frame
    #:goaway-frame

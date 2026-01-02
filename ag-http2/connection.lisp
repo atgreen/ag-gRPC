@@ -267,7 +267,7 @@ Respects MAX_FRAME_SIZE and flow control windows, fragmenting if needed."
             (stream (multiplexer-get-stream (connection-multiplexer conn) stream-id))
             (end-headers-p (plusp (logand (frame-flags frame) +flag-end-headers+)))
             (end-stream-p (plusp (logand (frame-flags frame) +flag-end-stream+))))
-       ;; Reject HEADERS if we're already expecting CONTINUATION
+              ;; Reject HEADERS if we're already expecting CONTINUATION
        (when (connection-pending-header-block conn)
          (error 'http2-connection-error
                 :message "Received HEADERS while awaiting CONTINUATION"
@@ -275,17 +275,20 @@ Respects MAX_FRAME_SIZE and flow control windows, fragmenting if needed."
        (if end-headers-p
            ;; Complete header block - decode immediately
            (let* ((decoder (connection-hpack-decoder conn))
-                  (headers (hpack-decode decoder (frame-payload frame))))
-             (stream-transition stream :recv-headers)
-             (if (stream-headers stream)
-                 (setf (stream-trailers stream) headers)
-                 (setf (stream-headers stream) headers))
-             (when end-stream-p
-               (stream-transition stream :recv-end-stream)))
+                  (header-block (extract-header-block frame)))
+             (format *error-output* "~&  header-block-len=~A first-10: ~{~2,'0X ~}~%"
+                     (length header-block) (coerce (subseq header-block 0 (min 10 (length header-block))) 'list))
+             (let ((headers (hpack-decode decoder header-block)))
+               (stream-transition stream :recv-headers)
+               (if (stream-headers stream)
+                   (setf (stream-trailers stream) headers)
+                   (setf (stream-headers stream) headers))
+               (when end-stream-p
+                 (stream-transition stream :recv-end-stream))))
            ;; Incomplete - buffer and wait for CONTINUATION
            (progn
              (setf (connection-pending-header-block conn)
-                   (copy-seq (frame-payload frame)))
+                   (extract-header-block frame))
              (setf (connection-pending-header-stream-id conn) stream-id)
              (setf (connection-pending-header-end-stream conn) end-stream-p)))))
     (continuation-frame

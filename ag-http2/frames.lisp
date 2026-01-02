@@ -90,6 +90,10 @@
              :documentation "Alist of setting id to value"))
   (:default-initargs :type +frame-type-settings+))
 
+(defun settings-frame-ack-p (frame)
+  "Return T if SETTINGS frame has ACK flag set."
+  (plusp (logand (frame-flags frame) +flag-ack+)))
+
 (defclass push-promise-frame (frame)
   ((promised-stream-id :initarg :promised-stream-id :accessor push-promise-frame-promised-stream-id)
    (headers :initarg :headers :accessor push-promise-frame-headers))
@@ -229,6 +233,28 @@ Handles partial reads by retrying until complete or EOF."
           (ash (aref payload 1) 16)
           (ash (aref payload 2) 8)
           (aref payload 3)))
+
+(defun extract-header-block (frame)
+  "Extract the header block fragment from a HEADERS or CONTINUATION frame.
+Strips padding (if PADDED flag set) and priority data (if PRIORITY flag set)."
+  (let* ((payload (frame-payload frame))
+         (flags (frame-flags frame))
+         (padded-p (plusp (logand flags +flag-padded+)))
+         (priority-p (plusp (logand flags +flag-priority+)))
+         (pos 0)
+         (pad-length 0))
+    ;; Handle PADDED flag - first byte is pad length
+    (when padded-p
+      (setf pad-length (aref payload 0))
+      (incf pos 1))
+    ;; Handle PRIORITY flag - 5 bytes of priority data
+    (when priority-p
+      (incf pos 5))
+    ;; Extract header block (everything except padding at end)
+    (let* ((end (- (length payload) pad-length))
+           (header-block (make-array (- end pos) :element-type '(unsigned-byte 8))))
+      (replace header-block payload :start2 pos :end2 end)
+      header-block)))
 
 ;;;; ========================================================================
 ;;;; Frame Construction Helpers

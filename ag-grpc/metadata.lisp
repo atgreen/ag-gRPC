@@ -121,16 +121,21 @@ Returns a new metadata object."
 (defun decode-metadata-headers (headers)
   "Decode metadata from HTTP/2 headers, auto-decoding -bin keys.
 Returns an alist with binary values decoded."
-  (loop for (key . value) in headers
-        ;; Skip pseudo-headers and standard gRPC headers
-        unless (or (and (keywordp key) (member key '(:status :method :scheme :path :authority)))
-                   (member key '("content-type" "te" "user-agent" "grpc-encoding"
-                                 "grpc-accept-encoding" "grpc-timeout" "grpc-status"
-                                 "grpc-message")
-                           :test #'string-equal))
-        collect (if (and (stringp key) (binary-metadata-key-p key))
-                    (cons key (decode-binary-metadata value))
-                    (cons key value))))
+  (when (and headers (listp headers))
+    (loop for entry in headers
+          when (consp entry)
+            collect (let ((key (car entry))
+                          (value (cdr entry)))
+                      ;; Skip pseudo-headers and standard gRPC headers
+                      (unless (or (and (keywordp key) (member key '(:status :method :scheme :path :authority)))
+                                  (and (stringp key)
+                                       (member key '("content-type" "te" "user-agent" "grpc-encoding"
+                                                     "grpc-accept-encoding" "grpc-timeout" "grpc-status"
+                                                     "grpc-message")
+                                               :test #'string-equal)))
+                        (if (and (stringp key) (binary-metadata-key-p key))
+                            (cons key (decode-binary-metadata value))
+                            (cons key value)))))))
 
 ;;; Simple base64 implementation for metadata encoding
 
