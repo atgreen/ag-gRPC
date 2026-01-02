@@ -622,8 +622,13 @@ DECODER is needed to look up indexed names from the dynamic table."
   (let ((index-bits (logand (aref bytes pos) (1- (ash 1 prefix-bits)))))
     (multiple-value-bind (name new-pos)
         (if (zerop index-bits)
+            ;; Index 0 means new name follows as a string
             (hpack-decode-string bytes (1+ pos))
-            (values (car (hpack-get-indexed decoder index-bits)) (1+ pos)))
+            ;; Index > 0 means name is in the table
+            ;; But we need to properly decode the index (may have continuation bytes)
+            (multiple-value-bind (index idx-new-pos)
+                (hpack-decode-integer prefix-bits bytes pos)
+              (values (car (hpack-get-indexed decoder index)) idx-new-pos)))
       (multiple-value-bind (value final-pos)
           (hpack-decode-string bytes new-pos)
         (values name value final-pos)))))
