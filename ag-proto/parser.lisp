@@ -32,7 +32,9 @@
 
   messageBody = <'{'> (<ws> (field / enum / message / option / oneof / mapField / reserved / emptyStatement))* <ws> <'}'>
 
-  field = 'repeated'? <ws> type <ws> fieldName <ws> <'='> <ws> fieldNumber fieldOptions? <ws> <';'>
+  field = fieldLabel? <ws> type <ws> fieldName <ws> <'='> <ws> fieldNumber fieldOptions? <ws> <';'>
+
+  fieldLabel = 'repeated' / 'optional'
 
   fieldOptions = <ws> <'['> <ws> fieldOption (<ws> <','> <ws> fieldOption)* <ws> <']'>
 
@@ -273,13 +275,20 @@
 (defun transform-field (node)
   "Transform a field parse node into a proto-field-descriptor"
   (let ((field-desc (make-instance 'proto-field-descriptor))
-        (repeated nil)
+        (label nil)
         (type nil)
         (name nil)
         (number nil))
     (dolist (child (cdr node))
       (cond
-        ((equal child "repeated") (setf repeated t))
+        ;; Handle fieldLabel node (from new grammar)
+        ((and (consp child) (eq (car child) :fieldLabel))
+         (let ((label-str (cadr child)))
+           (cond ((equal label-str "repeated") (setf label :repeated))
+                 ((equal label-str "optional") (setf label :optional)))))
+        ;; Handle old-style direct string for backwards compatibility
+        ((equal child "repeated") (setf label :repeated))
+        ((equal child "optional") (setf label :optional))
         ((stringp child)
          (cond
            ((member child '("double" "float" "int32" "int64" "uint32" "uint64"
@@ -298,7 +307,7 @@
     (setf (proto-field-name field-desc) (or name "unknown"))
     (setf (proto-field-number field-desc) (or number 0))
     (setf (proto-field-type field-desc) (or type :unknown))
-    (setf (proto-field-label field-desc) (if repeated :repeated :optional))
+    (setf (proto-field-label field-desc) (or label :optional))
     field-desc))
 
 (defun extract-type (node)
@@ -500,8 +509,73 @@ Returns a proto-file-descriptor."
         (transform-proto-ast ast)
         (error 'proto-parse-error :message "Failed to parse proto3 content"))))
 
-(defun parse-proto-file (pathname)
+(defvar *include-paths* nil
+  "List of directories to search for imported proto files.")
+
+(defvar *parsed-imports* nil
+  "Hash table of already-parsed import files to avoid cycles.")
+
+(defun ensure-directory-pathname (path)
+  "Ensure PATH is treated as a directory for merge-pathnames."
+  (let ((p (pathname path)))
+    (if (pathname-name p)
+        ;; Path looks like a file (e.g., "/foo/bar" without trailing slash)
+        ;; Convert to directory form
+        (make-pathname :directory (append (or (pathname-directory p) '(:relative))
+                                          (list (pathname-name p)))
+                       :defaults p)
+        p)))
+
+(defun find-proto-file (import-path include-paths base-dir)
+  "Find a proto file in include paths or relative to base directory.
+Returns the full pathname if found, NIL otherwise."
+  (let ((paths (append include-paths (list base-dir))))
+    (dolist (dir paths)
+      (let* ((dir-path (ensure-directory-pathname dir))
+             (full-path (merge-pathnames import-path dir-path)))
+        (when (probe-file full-path)
+          (return-from find-proto-file full-path))))
+    nil))
+
+(defvar *last-parsed-imports* nil
+  "After parse-proto-file completes, contains all file descriptors parsed (including imports).")
+
+(defun parse-proto-file (pathname &key include-paths)
   "Parse a proto3 file.
-Returns a proto-file-descriptor."
-  (let ((content (uiop:read-file-string pathname)))
-    (parse-proto-string content)))
+INCLUDE-PATHS is a list of directories to search for imports.
+Returns a proto-file-descriptor.
+After parsing, *last-parsed-imports* will contain all parsed file descriptors."
+  (let* ((*include-paths* (or include-paths *include-paths*))
+         (*parsed-imports* (or *parsed-imports* (make-hash-table :test 'equal)))
+         (abs-path (truename pathname))
+         (base-dir (make-pathname :directory (pathname-directory abs-path)))
+         (content (uiop:read-file-string abs-path))
+         (file-desc (parse-proto-string content)))
+    ;; Set the file name on the descriptor
+    (setf (proto-file-name file-desc) (file-namestring abs-path))
+    ;; Mark this file as parsed
+    (setf (gethash (namestring abs-path) *parsed-imports*) file-desc)
+    ;; Process imports
+    (dolist (import-path (proto-file-imports file-desc))
+      (unless (gethash import-path *parsed-imports*)
+        (let ((import-file (find-proto-file import-path *include-paths* base-dir)))
+          (if import-file
+              (parse-proto-file import-file :include-paths *include-paths*)
+              ;; Silently skip missing imports for now (common for well-known types)
+              nil))))
+    ;; Store all parsed imports for later use
+    (setf *last-parsed-imports* *parsed-imports*)
+    file-desc))
+
+(defun get-all-enum-types ()
+  "Collect all enum type names from all parsed file descriptors (including imports).
+Should be called after parse-proto-file. Returns a hash table of enum names."
+  (let ((all-enums (make-hash-table :test 'equal)))
+    (when *last-parsed-imports*
+      (maphash (lambda (path file-desc)
+                 (declare (ignore path))
+                 (let ((file-enums (ag-proto:collect-enum-names file-desc)))
+                   (maphash (lambda (k v) (setf (gethash k all-enums) v))
+                            file-enums)))
+               *last-parsed-imports*))
+    all-enums))

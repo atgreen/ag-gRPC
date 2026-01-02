@@ -125,12 +125,14 @@
    ;; Parser
    #:parse-proto-file
    #:parse-proto-string
+   #:get-all-enum-types
 
    ;; Code generation
    #:generate-lisp-code
    #:compile-proto-file
    #:compile-proto-string
    #:generate-service-code
+   #:collect-enum-names
 
    ;; Client stubs
    #:stub-channel

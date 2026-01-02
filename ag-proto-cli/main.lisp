@@ -62,19 +62,38 @@
    :key :verbose
    :description "Show verbose output"))
 
+(defun make-include-path-option ()
+  "Create -I/--include-path option for specifying proto include paths."
+  (clingon:make-option
+   :list
+   :short-name #\I
+   :long-name "include-path"
+   :key :include-paths
+   :description "Add directory to proto import search path (can be repeated)"))
+
 ;;; -------------------------------------------------------------------------
 ;;; CLI Handler
 ;;; -------------------------------------------------------------------------
+
+(defun ensure-directory-pathname (path)
+  "Ensure PATH is treated as a directory for merge-pathnames."
+  (let ((p (pathname path)))
+    (if (pathname-name p)
+        ;; Path looks like a file - convert to directory form
+        (make-pathname :directory (append (or (pathname-directory p) '(:relative))
+                                          (list (pathname-name p)))
+                       :defaults p)
+        p)))
 
 (defun derive-output-filename (input-path output-dir)
   "Derive output filename from input path and output directory."
   (let* ((name (pathname-name input-path))
          (output-name (format nil "~A.lisp" name)))
     (if output-dir
-        (merge-pathnames output-name (pathname output-dir))
+        (merge-pathnames output-name (ensure-directory-pathname output-dir))
         output-name)))
 
-(defun compile-proto-to-lisp (input-file &key output-file package load verbose print)
+(defun compile-proto-to-lisp (input-file &key output-file package load verbose print include-paths)
   "Compile a single .proto file to Lisp."
   (when verbose
     (format *error-output* "; Compiling ~A~%" input-file))
@@ -82,8 +101,11 @@
                   (or (find-package (string-upcase package))
                       (make-package (string-upcase package)))
                   (find-package :cl-user)))
-         (file-desc (ag-proto:parse-proto-file input-file))
-         (forms (ag-proto:generate-lisp-code file-desc :package pkg)))
+         (file-desc (ag-proto:parse-proto-file input-file :include-paths include-paths))
+         ;; Collect enum types from all parsed files (including imports)
+         (all-enum-types (ag-proto:get-all-enum-types))
+         (forms (ag-proto:generate-lisp-code file-desc :package pkg
+                                              :additional-enum-types all-enum-types)))
     ;; Write to output file if specified
     (when output-file
       (when verbose
@@ -124,6 +146,7 @@
         (load (clingon:getopt cmd :load))
         (print (clingon:getopt cmd :print))
         (verbose (clingon:getopt cmd :verbose))
+        (include-paths (clingon:getopt cmd :include-paths))
         (args (clingon:command-arguments cmd)))
     ;; Validate arguments
     (unless args
@@ -152,7 +175,8 @@
                                    :package package
                                    :load load
                                    :verbose verbose
-                                   :print print)))
+                                   :print print
+                                   :include-paths include-paths)))
       (error (e)
         (format *error-output* "Error: ~A~%" e)
         (uiop:quit 1)))))
@@ -188,7 +212,8 @@ Examples:
                   (make-package-option)
                   (make-load-option)
                   (make-print-option)
-                  (make-verbose-option))
+                  (make-verbose-option)
+                  (make-include-path-option))
    :handler #'handle-cli))
 
 ;;; -------------------------------------------------------------------------

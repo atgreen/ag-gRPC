@@ -12,6 +12,18 @@
 ;;;; - deserialize-from-stream method
 ;;;; ========================================================================
 
+;;; Special variable to track known enum types during code generation
+(defvar *known-enum-types* nil
+  "Set of enum type names known during code generation.
+Used to determine if a field type should be serialized as varint (enum) or
+length-delimited (message).")
+
+(defun enum-type-p (type-name)
+  "Return T if TYPE-NAME refers to a known enum type."
+  (and *known-enum-types*
+       (stringp type-name)
+       (gethash type-name *known-enum-types*)))
+
 ;;; Type mapping
 
 (defun proto-type-to-lisp-type (proto-type)
@@ -51,7 +63,9 @@
     "MAP" "REDUCE" "APPEND" "REVERSE" "SEARCH" "SUBSTITUTE" "REPLACE"
     "FIRST" "SECOND" "THIRD" "REST" "LAST" "NTH" "ELT" "AREF"
     "CAR" "CDR" "PUSH" "POP" "ERROR" "WARN" "FORMAT" "PRINT" "READ" "WRITE"
-    "OPEN" "CLOSE" "TIME" "SLEEP" "RANDOM")
+    "OPEN" "CLOSE" "TIME" "SLEEP" "RANDOM"
+    ;; Other CL symbols that cause package lock violations as slot names
+    "METHOD" "STRUCT")
   "CL symbols that should not be used as accessor names (to avoid package lock violations)")
 
 (defun safe-accessor-name (name package)
@@ -62,8 +76,11 @@
         (intern upname package))))
 
 (defun field-name-to-slot-name (name)
-  "Convert a field name to a slot name symbol"
-  (intern (string-upcase (substitute #\- #\_ name))))
+  "Convert a field name to a slot name symbol, prefixing with PROTO- if it conflicts with CL"
+  (let ((upname (string-upcase (substitute #\- #\_ name))))
+    (if (member upname *cl-reserved-names* :test #'string=)
+        (intern (concatenate 'string "PROTO-" upname))
+        (intern upname))))
 
 (defun field-name-to-keyword (name)
   "Convert a field name to a keyword symbol"
@@ -97,16 +114,21 @@ ONEOFS is the list of oneof descriptors for the message."
          (slot-name (field-name-to-slot-name name))
          (field-num (proto-field-number field))
          (type (proto-field-type field))
-         (wire-type (proto-type-wire-type type))
+         ;; Check if this is an enum type (stored as string)
+         (is-enum (enum-type-p type))
+         ;; Use varint wire type for enums, otherwise use standard wire type
+         (wire-type (if is-enum +wire-type-varint+ (proto-type-wire-type type)))
+         ;; Use :enum for serialization if this is an enum type
+         (serialize-type (if is-enum :enum type))
          (repeated-p (eq (proto-field-label field) :repeated))
          (oneof-index (proto-field-oneof-index field)))
     (if repeated-p
         ;; Repeated field - serialize each element
         `(dolist (elem (slot-value obj ',slot-name))
            (write-field-tag ,field-num ,wire-type buffer)
-           ,(generate-value-serializer 'elem type 'buffer))
+           ,(generate-value-serializer 'elem serialize-type 'buffer))
         ;; Singular field - only serialize if non-default
-        (let ((default (proto3-default-value type)))
+        (let ((default (if is-enum 0 (proto3-default-value type))))
           (if oneof-index
               ;; Oneof field - only serialize if this variant is active
               (let* ((oneof (when oneofs (nth oneof-index oneofs)))
@@ -117,14 +139,14 @@ ONEOFS is the list of oneof descriptors for the message."
                      (field-keyword (field-name-to-keyword name)))
                 `(when (eq (slot-value obj ',case-slot) ,field-keyword)
                    (let ((value (slot-value obj ',slot-name)))
-                     (when ,(generate-non-default-check 'value type default)
+                     (when ,(generate-non-default-check 'value serialize-type default)
                        (write-field-tag ,field-num ,wire-type buffer)
-                       ,(generate-value-serializer 'value type 'buffer)))))
+                       ,(generate-value-serializer 'value serialize-type 'buffer)))))
               ;; Regular field
               `(let ((value (slot-value obj ',slot-name)))
-                 (when ,(generate-non-default-check 'value type default)
+                 (when ,(generate-non-default-check 'value serialize-type default)
                    (write-field-tag ,field-num ,wire-type buffer)
-                   ,(generate-value-serializer 'value type 'buffer))))))))
+                   ,(generate-value-serializer 'value serialize-type 'buffer))))))))
 
 (defun generate-non-default-check (var type default)
   "Generate code to check if a value is non-default"
@@ -183,11 +205,15 @@ ONEOFS is the list of oneof descriptors for the message."
          (slot-name (field-name-to-slot-name name))
          (field-num (proto-field-number field))
          (type (proto-field-type field))
+         ;; Check if this is an enum type
+         (is-enum (enum-type-p type))
+         ;; Use :enum for deserialization if this is an enum type
+         (deserialize-type (if is-enum :enum type))
          (repeated-p (eq (proto-field-label field) :repeated))
          (oneof-index (proto-field-oneof-index field)))
     `(,field-num
       ,(if repeated-p
-           `(push ,(generate-value-deserializer type 'buffer 'wire-type)
+           `(push ,(generate-value-deserializer deserialize-type 'buffer 'wire-type)
                   (slot-value obj ',slot-name))
            (if oneof-index
                ;; Oneof field: clear other fields and set the case slot
@@ -207,13 +233,13 @@ ONEOFS is the list of oneof descriptors for the message."
                               other-fields)
                     ;; Set this field
                     (setf (slot-value obj ',slot-name)
-                          ,(generate-value-deserializer type 'buffer 'wire-type))
+                          ,(generate-value-deserializer deserialize-type 'buffer 'wire-type))
                     ;; Update case slot
                     ,@(when case-slot
                         `((setf (slot-value obj ',case-slot) ,field-keyword)))))
                ;; Regular field
                `(setf (slot-value obj ',slot-name)
-                      ,(generate-value-deserializer type 'buffer 'wire-type)))))))
+                      ,(generate-value-deserializer deserialize-type 'buffer 'wire-type)))))))
 
 (defun generate-value-deserializer (type buffer-var wire-type-var)
   "Generate code to deserialize a value of the given type"
@@ -466,15 +492,49 @@ ONEOFS is the list of oneof descriptors for the message."
 
 ;;; Main code generation entry points
 
-(defun generate-lisp-code (file-desc &key (package *package*) (generate-stubs t))
+(defun collect-enum-names (file-desc)
+  "Collect all enum type names from a file descriptor into a hash table.
+Includes top-level enums and nested enums from messages."
+  (let ((enum-table (make-hash-table :test 'equal)))
+    ;; Top-level enums
+    (dolist (enum (proto-file-enums file-desc))
+      (setf (gethash (proto-enum-name enum) enum-table) t))
+    ;; Nested enums in messages
+    (labels ((collect-from-message (msg prefix)
+               (let ((full-prefix (if prefix
+                                      (format nil "~A.~A" prefix (proto-message-name msg))
+                                      (proto-message-name msg))))
+                 ;; Nested enums
+                 (dolist (nested-enum (proto-message-nested-enums msg))
+                   (setf (gethash (proto-enum-name nested-enum) enum-table) t)
+                   (setf (gethash (format nil "~A.~A" full-prefix (proto-enum-name nested-enum))
+                                  enum-table) t))
+                 ;; Recurse into nested messages
+                 (dolist (nested-msg (proto-message-nested-messages msg))
+                   (collect-from-message nested-msg full-prefix)))))
+      (dolist (msg (proto-file-messages file-desc))
+        (collect-from-message msg nil)))
+    enum-table))
+
+(defun generate-lisp-code (file-desc &key (package *package*) (generate-stubs t) additional-enum-types)
   "Generate Lisp code for all messages in a proto file descriptor.
 Returns a list of forms to be compiled.
-If GENERATE-STUBS is true (default), also generates client stubs for services."
-  (let ((messages (proto-file-messages file-desc))
-        (enums (proto-file-enums file-desc))
-        (services (proto-file-services file-desc))
-        (proto-package (proto-file-package file-desc))
-        (forms nil))
+If GENERATE-STUBS is true (default), also generates client stubs for services.
+ADDITIONAL-ENUM-TYPES is a hash table of extra enum type names to include (from imports)."
+  ;; Build enum types table for this file, merging with additional types
+  (let* ((local-enums (collect-enum-names file-desc))
+         (*known-enum-types* (if additional-enum-types
+                                 ;; Merge additional enum types into local enums
+                                 (progn
+                                   (maphash (lambda (k v) (setf (gethash k local-enums) v))
+                                            additional-enum-types)
+                                   local-enums)
+                                 local-enums))
+         (messages (proto-file-messages file-desc))
+         (enums (proto-file-enums file-desc))
+         (services (proto-file-services file-desc))
+         (proto-package (proto-file-package file-desc))
+         (forms nil))
     ;; Generate enums first
     (dolist (enum enums)
       (push (generate-enum-definition enum package) forms))
