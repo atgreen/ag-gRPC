@@ -125,6 +125,9 @@
    ;; Conditions
    #:grpc-error
    #:grpc-status-error
+   #:grpc-status-error-code
+   #:grpc-status-error-message
+   #:grpc-status-error-details
 
    ;; Server
    #:grpc-server

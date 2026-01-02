@@ -69,6 +69,23 @@ The response is available via (call-response call)."
       (unless (and status-header (string= (cdr status-header) "200"))
         (setf (call-status call) +grpc-status-unknown+)
         (return-from call-unary call)))
+    ;; Check for "trailers-only" mode - gRPC status in headers (error without body)
+    (let ((grpc-status-header (assoc "grpc-status" (call-response-headers call)
+                                     :test #'string-equal)))
+      (when grpc-status-header
+        ;; Trailers-only response - status is in headers
+        (setf (call-status call) (parse-integer (cdr grpc-status-header)))
+        (let ((message-header (assoc "grpc-message" (call-response-headers call)
+                                     :test #'string-equal)))
+          (when message-header
+            (setf (call-status-message call)
+                  (percent-decode (cdr message-header)))))
+        ;; Signal error if not OK
+        (unless (grpc-status-ok-p (call-status call))
+          (error 'grpc-status-error
+                 :code (call-status call)
+                 :message (call-status-message call)))
+        (return-from call-unary call)))
     ;; Receive response message
     (let ((response-data (channel-receive-message channel stream-id)))
       (when response-data
