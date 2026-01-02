@@ -10,6 +10,34 @@ ag-gRPC provides a complete gRPC stack (client and server) written entirely in p
 - **ag-http2** - HTTP/2 protocol implementation (RFC 7540) with HPACK header compression (RFC 7541)
 - **ag-grpc** - gRPC protocol implementation for client and server
 
+## Status
+
+ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/connectrpc/conformance), achieving **100% pass rate** on supported features.
+
+### Conformance Test Results
+
+| Category | Tests | Status |
+|----------|-------|--------|
+| Unary RPC | 82 | ✅ Pass |
+| Client Streaming | 23 | ✅ Pass |
+| Server Streaming | 59 | ✅ Pass |
+| **Total** | **164** | **100%** |
+
+### Feature Support Matrix
+
+| Feature | Client | Server |
+|---------|--------|--------|
+| Unary RPC | ✅ | ✅ |
+| Client Streaming | ✅ | ✅ |
+| Server Streaming | ✅ | ✅ |
+| Bidirectional Streaming | ✅ | ✅ |
+| Metadata | ✅ | ✅ |
+| Deadlines/Timeouts | ✅ | ✅ |
+| Cancellation | ✅ | — |
+| TLS (h2) | ✅ | — |
+| Plaintext (h2c) | ✅ | ✅ |
+| Compression (gzip) | — | — |
+
 ## Features
 
 - Pure Common Lisp - minimal foreign dependencies
