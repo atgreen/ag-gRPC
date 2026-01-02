@@ -1,0 +1,119 @@
+// Simplified gRPC interop test proto for ag-gRPC conformance testing
+// Based on grpc/grpc interop test definitions
+
+syntax = "proto3";
+
+package grpc.testing;
+
+option go_package = "interop-server/pb";
+
+// Empty message
+message Empty {}
+
+// The type of payload
+enum PayloadType {
+  COMPRESSABLE = 0;
+}
+
+// A block of data to increase message size
+message Payload {
+  PayloadType type = 1;
+  bytes body = 2;
+}
+
+// Status to echo back
+message EchoStatus {
+  int32 code = 1;
+  string message = 2;
+}
+
+// Wrapper for bool (nullable)
+message BoolValue {
+  bool value = 1;
+}
+
+// Unary request
+message SimpleRequest {
+  PayloadType response_type = 1;
+  int32 response_size = 2;
+  Payload payload = 3;
+  bool fill_username = 4;
+  bool fill_oauth_scope = 5;
+  BoolValue response_compressed = 6;
+  EchoStatus response_status = 7;
+  BoolValue expect_compressed = 8;
+  bool fill_server_id = 9;
+}
+
+// Unary response
+message SimpleResponse {
+  Payload payload = 1;
+  string username = 2;
+  string oauth_scope = 3;
+  string server_id = 4;
+  string hostname = 5;
+}
+
+// Configuration for a response in streaming
+message ResponseParameters {
+  int32 size = 1;
+  int32 interval_us = 2;
+  BoolValue compressed = 3;
+}
+
+// Server-streaming request
+message StreamingOutputCallRequest {
+  PayloadType response_type = 1;
+  repeated ResponseParameters response_parameters = 2;
+  Payload payload = 3;
+  EchoStatus response_status = 7;
+}
+
+// Server-streaming response
+message StreamingOutputCallResponse {
+  Payload payload = 1;
+}
+
+// Client-streaming request
+message StreamingInputCallRequest {
+  Payload payload = 1;
+  BoolValue expect_compressed = 2;
+}
+
+// Client-streaming response
+message StreamingInputCallResponse {
+  int32 aggregated_payload_size = 1;
+}
+
+// Test service covering the method signature permutations
+service TestService {
+  // Empty request, empty response
+  rpc EmptyCall(Empty) returns (Empty);
+
+  // Unary call
+  rpc UnaryCall(SimpleRequest) returns (SimpleResponse);
+
+  // Server streaming
+  rpc StreamingOutputCall(StreamingOutputCallRequest)
+      returns (stream StreamingOutputCallResponse);
+
+  // Client streaming
+  rpc StreamingInputCall(stream StreamingInputCallRequest)
+      returns (StreamingInputCallResponse);
+
+  // Bidirectional streaming
+  rpc FullDuplexCall(stream StreamingOutputCallRequest)
+      returns (stream StreamingOutputCallResponse);
+
+  // Half duplex (buffered bidi)
+  rpc HalfDuplexCall(stream StreamingOutputCallRequest)
+      returns (stream StreamingOutputCallResponse);
+
+  // Unimplemented - server should not implement this
+  rpc UnimplementedCall(Empty) returns (Empty);
+}
+
+// Service that is not implemented - for testing unimplemented service errors
+service UnimplementedService {
+  rpc UnimplementedCall(Empty) returns (Empty);
+}

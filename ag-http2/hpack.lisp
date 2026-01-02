@@ -404,9 +404,16 @@
   "Create a new dynamic table"
   (make-instance 'hpack-dynamic-table :max-size max-size))
 
+(defun hpack-header-name-length (name)
+  "Get the length of a header name for HPACK size calculation.
+Handles both string and keyword names."
+  (if (stringp name)
+      (length name)
+      (length (string name))))  ; Convert keyword/symbol to string
+
 (defun dynamic-table-add (table name value)
   "Add a header to the dynamic table"
-  (let ((entry-size (+ 32 (length name) (length value))))
+  (let ((entry-size (+ 32 (hpack-header-name-length name) (length value))))
     ;; Evict entries if needed
     (loop while (> (+ (dynamic-table-size table) entry-size)
                    (dynamic-table-max-size table))
@@ -419,7 +426,7 @@
   "Evict the oldest entry from the dynamic table"
   (let* ((entries (dynamic-table-entries table))
          (entry (aref entries 0))
-         (entry-size (+ 32 (length (car entry)) (length (cdr entry)))))
+         (entry-size (+ 32 (hpack-header-name-length (car entry)) (length (cdr entry)))))
     (decf (dynamic-table-size table) entry-size)
     ;; Shift entries down
     (loop for i from 0 below (1- (fill-pointer entries))
@@ -586,7 +593,7 @@
                  ;; Literal header field with incremental indexing (01xxxxxx)
                  ((= (logand byte #xc0) #x40)
                   (multiple-value-bind (name value new-pos)
-                      (hpack-decode-literal bytes pos 6)
+                      (hpack-decode-literal decoder bytes pos 6)
                     (push (cons name value) headers)
                     (dynamic-table-add (decoder-dynamic-table decoder) name value)
                     (setf pos new-pos)))
@@ -604,31 +611,44 @@
                  ;; Literal without indexing (0000xxxx) or never indexed (0001xxxx)
                  (t
                   (multiple-value-bind (name value new-pos)
-                      (hpack-decode-literal bytes pos 4)
+                      (hpack-decode-literal decoder bytes pos 4)
                     (push (cons name value) headers)
                     (setf pos new-pos))))))
     (nreverse headers)))
 
-(defun hpack-decode-literal (bytes pos prefix-bits)
-  "Decode a literal header field. Returns (values name value new-pos)"
+(defun hpack-decode-literal (decoder bytes pos prefix-bits)
+  "Decode a literal header field. Returns (values name value new-pos).
+DECODER is needed to look up indexed names from the dynamic table."
   (let ((index-bits (logand (aref bytes pos) (1- (ash 1 prefix-bits)))))
     (multiple-value-bind (name new-pos)
         (if (zerop index-bits)
             (hpack-decode-string bytes (1+ pos))
-            (values (car (hpack-get-indexed nil index-bits)) (1+ pos)))
+            (values (car (hpack-get-indexed decoder index-bits)) (1+ pos)))
       (multiple-value-bind (value final-pos)
           (hpack-decode-string bytes new-pos)
         (values name value final-pos)))))
 
 (defun hpack-get-indexed (decoder index)
-  "Get a header from the static or dynamic table by index"
+  "Get a header from the static or dynamic table by index.
+Index 0 is invalid in HPACK."
   (cond
+    ;; Index 0 is invalid
+    ((zerop index)
+     (error "Invalid HPACK index 0"))
+    ;; Static table: indices 1 through (length *hpack-static-table*)
     ((<= index (length *hpack-static-table*))
      (aref *hpack-static-table* (1- index)))
+    ;; Dynamic table
     (decoder
      (let* ((dyn-table (decoder-dynamic-table decoder))
             (entries (dynamic-table-entries dyn-table))
-            (dyn-index (- index (length *hpack-static-table*) 1)))
-       (aref entries (- (length entries) dyn-index 1))))
+            (static-len (length *hpack-static-table*))
+            (dyn-index (- index static-len 1))
+            (entry-count (length entries)))
+       ;; Check bounds
+       (if (and (>= dyn-index 0) (< dyn-index entry-count))
+           (aref entries (- entry-count dyn-index 1))
+           (error "Invalid HPACK dynamic table index: ~A (static-len=~A, dyn-entries=~A)"
+                  index static-len entry-count))))
     (t
-     (error "Invalid HPACK index: ~A" index))))
+     (error "Invalid HPACK index: ~A (no decoder for dynamic table)" index))))
