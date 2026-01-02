@@ -41,6 +41,106 @@
 
 (in-package #:conformance-client)
 
+;;; Base64 decoding for grpc-status-details-bin
+
+(defparameter *base64-decode-table*
+  (let ((table (make-array 256 :element-type '(signed-byte 8) :initial-element -1)))
+    (loop for char across "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+          for i from 0
+          do (setf (aref table (char-code char)) i))
+    ;; Also handle URL-safe variants
+    (setf (aref table (char-code #\-)) 62)  ; - instead of +
+    (setf (aref table (char-code #\_)) 63)  ; _ instead of /
+    table))
+
+(defun base64-decode (string)
+  "Decode a base64 string to a byte vector."
+  (let* ((len (length string))
+         ;; Remove padding and calculate output size
+         (padding (cond ((and (> len 0) (char= (char string (1- len)) #\=))
+                         (if (and (> len 1) (char= (char string (- len 2)) #\=)) 2 1))
+                        (t 0)))
+         (input-len (- len padding))
+         (output-len (floor (* input-len 3) 4))
+         (output (make-array output-len :element-type '(unsigned-byte 8)))
+         (out-pos 0)
+         (buffer 0)
+         (bits 0))
+    (loop for i from 0 below input-len
+          for char = (char string i)
+          for val = (aref *base64-decode-table* (char-code char))
+          when (>= val 0)
+            do (setf buffer (logior (ash buffer 6) val))
+               (incf bits 6)
+               (when (>= bits 8)
+                 (decf bits 8)
+                 (when (< out-pos output-len)
+                   (setf (aref output out-pos) (logand (ash buffer (- bits)) #xff))
+                   (incf out-pos))))
+    output))
+
+;;; Parsing grpc-status-details-bin (google.rpc.Status message)
+
+(defun parse-grpc-status-details (data)
+  "Parse a google.rpc.Status message and return the details as a list of Any objects.
+google.rpc.Status: int32 code (1), string message (2), repeated Any details (3)"
+  (let ((pos 0)
+        (len (length data))
+        (details nil))
+    (labels ((read-varint ()
+               (let ((result 0)
+                     (shift 0))
+                 (loop
+                   (when (>= pos len) (return result))
+                   (let ((byte (aref data pos)))
+                     (incf pos)
+                     (setf result (logior result (ash (logand byte #x7f) shift)))
+                     (incf shift 7)
+                     (when (zerop (logand byte #x80))
+                       (return result))))))
+             (read-length-delimited ()
+               (let* ((length (read-varint))
+                      (end (+ pos length)))
+                 (when (> end len) (return-from read-length-delimited nil))
+                 (let ((result (subseq data pos end)))
+                   (setf pos end)
+                   result)))
+             (skip-field (wire-type)
+               (case wire-type
+                 (0 (read-varint))  ; varint
+                 (1 (incf pos 8))   ; 64-bit
+                 (2 (read-length-delimited))  ; length-delimited
+                 (5 (incf pos 4))))) ; 32-bit
+      (loop while (< pos len)
+            do (let* ((tag (read-varint))
+                      (field-number (ash tag -3))
+                      (wire-type (logand tag 7)))
+                 (case field-number
+                   (1 (read-varint))  ; code - skip
+                   (2 (read-length-delimited))  ; message - skip
+                   (3 ;; details - parse as Any
+                    (let ((any-bytes (read-length-delimited)))
+                      (when any-bytes
+                        (handler-case
+                            (push (ag-proto:deserialize-from-bytes 'any any-bytes)
+                                  details)
+                          (error () nil)))))
+                   (otherwise
+                    (skip-field wire-type)))))
+      (nreverse details))))
+
+(defun extract-error-details (trailers)
+  "Extract error details from grpc-status-details-bin header."
+  (let ((details-header (assoc "grpc-status-details-bin" trailers :test #'string-equal)))
+    (when details-header
+      (handler-case
+          (let* ((base64-data (cdr details-header))
+                 (decoded (base64-decode base64-data)))
+            (parse-grpc-status-details decoded))
+        (error (e)
+          (log-msg "Error parsing grpc-status-details-bin: ~A" e)
+          nil)))))
+
 ;;; Logging (defined early for use throughout)
 
 (defvar *log-stream* nil)
@@ -110,7 +210,8 @@
     ;; Only support gRPC for now (protocol = 2)
     (unless (= protocol 2)
       (error "Unsupported protocol: ~A (only GRPC supported)" protocol))
-    (ag-grpc:make-channel host port)))
+    ;; Create channel with no default timeout - timeout should be per-call
+    (ag-grpc:make-channel host port :timeout nil)))
 
 (defun convert-request-headers (headers test-name)
   "Convert conformance Header objects to gRPC metadata.
@@ -119,16 +220,19 @@ Also adds the x-test-case-name header."
     ;; Add test name header first
     (ag-grpc:metadata-set metadata "x-test-case-name" test-name)
     ;; Add headers from the request
-    (dolist (h headers)
+    ;; Process in reverse order because metadata-add uses push (prepends)
+    (dolist (h (reverse headers))
       (let ((name (slot-value h 'conformance-proto::name))
             (values (slot-value h 'conformance-proto::value)))
-        ;; Value is a list of strings - add each value
-        (dolist (v values)
+        ;; Value is a list of strings - add each value in reverse
+        ;; because metadata-add prepends (preserves original order)
+        (dolist (v (reverse values))
           (ag-grpc:metadata-add metadata name v))))
     metadata))
 
-(defun run-unary-call (conn service method request-messages codec metadata)
-  "Execute a unary gRPC call and return the response."
+(defun run-unary-call (conn service method request-messages codec metadata timeout-ms)
+  "Execute a unary gRPC call and return the response.
+TIMEOUT-MS - Timeout in milliseconds (0 means no timeout)."
   (declare (ignore codec))
   ;; For unary, we expect exactly one request message
   (let* ((any-msg (first request-messages))
@@ -136,11 +240,16 @@ Also adds the x-test-case-name header."
          (request-data (slot-value any-msg 'conformance-proto::value))
          (request (ag-proto:deserialize-from-bytes 'unary-request request-data))
          ;; Make the actual gRPC call
-         (method-path (format nil "/~A/~A" service method)))
-    (log-msg "Calling ~A with ~A metadata headers" method-path (ag-grpc:metadata-count metadata))
+         (method-path (format nil "/~A/~A" service method))
+         ;; Convert timeout from ms to seconds, nil if 0
+         (timeout-seconds (when (and timeout-ms (plusp timeout-ms))
+                           (/ timeout-ms 1000.0))))
+    (log-msg "Calling ~A with ~A metadata headers, timeout=~A ms"
+             method-path (ag-grpc:metadata-count metadata) timeout-ms)
     (handler-case
         (let ((call (ag-grpc:call-unary conn method-path request
                                         :metadata metadata
+                                        :timeout timeout-seconds
                                         :response-type 'unary-response)))
           (log-msg "Call completed, status=~A" (ag-grpc:call-status call))
           (values (ag-grpc:call-response call)
@@ -243,11 +352,12 @@ Handles edge cases where headers might be malformed."
                  (request-messages (slot-value request 'conformance-proto::request-messages))
                  (request-headers (slot-value request 'conformance-proto::request-headers))
                  (codec (slot-value request 'conformance-proto::codec))
+                 (timeout-ms (slot-value request 'conformance-proto::timeout-ms))
                  (metadata (convert-request-headers request-headers test-name))
                  (conn (make-grpc-connection request)))
             (unwind-protect
                 (multiple-value-bind (response headers trailers status-code status-msg)
-                    (run-unary-call conn service method request-messages codec metadata)
+                    (run-unary-call conn service method request-messages codec metadata timeout-ms)
                   ;; Build the response - always use ClientResponseResult
                   ;; ClientErrorResult is only for client-side failures, not gRPC errors
                   (let ((result (make-instance 'client-response-result
@@ -260,9 +370,11 @@ Handles edge cases where headers might be malformed."
                         (setf (slot-value result 'conformance-proto::payloads) (list payload))))
                     ;; Add error info if non-zero status
                     (when (and status-code (not (zerop status-code)))
-                      (let ((err (make-instance 'proto-error
-                                   :code status-code
-                                   :message (or status-msg ""))))
+                      (let* ((error-details (extract-error-details trailers))
+                             (err (make-instance 'proto-error
+                                    :code status-code
+                                    :message (or status-msg "")
+                                    :details error-details)))
                         (setf (slot-value result 'conformance-proto::proto-error) err)))
                     (make-success-response test-name result)))
               (ag-grpc:channel-close conn))))

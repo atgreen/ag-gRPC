@@ -32,9 +32,10 @@
              :documentation "Default metadata for all calls"))
   (:documentation "gRPC client channel"))
 
-(defun make-channel (host port &key (connect t) timeout metadata tls (tls-verify nil))
+(defun make-channel (host port &key (connect t) (timeout 30 timeout-supplied-p) metadata tls (tls-verify nil))
   "Create a new gRPC channel to a server.
 If CONNECT is true (default), immediately establish the connection.
+TIMEOUT - Default timeout in seconds. Pass NIL to disable default timeout.
 If TLS is true, use TLS encryption (requires cl+ssl).
 If TLS-VERIFY is true, verify server certificates."
   (let ((channel (make-instance 'grpc-channel
@@ -42,7 +43,7 @@ If TLS-VERIFY is true, verify server certificates."
                                 :port port
                                 :tls tls
                                 :tls-verify tls-verify
-                                :default-timeout (or timeout 30)
+                                :default-timeout (if timeout-supplied-p timeout 30)
                                 :metadata metadata)))
     (when connect
       (channel-connect channel))
