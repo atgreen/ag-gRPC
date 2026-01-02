@@ -124,6 +124,7 @@
 
    ;; Conditions
    #:grpc-error
+   #:grpc-error-message
    #:grpc-status-error
    #:grpc-status-error-code
    #:grpc-status-error-message

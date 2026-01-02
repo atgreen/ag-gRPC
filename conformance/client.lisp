@@ -157,7 +157,19 @@ Also adds the x-test-case-name header."
                 (ag-grpc:grpc-status-error-headers e)
                 (ag-grpc:grpc-status-error-trailers e)
                 (ag-grpc:grpc-status-error-code e)
-                (ag-grpc:grpc-status-error-message e))))))
+                (ag-grpc:grpc-status-error-message e)))
+      (ag-grpc:grpc-error (e)
+        ;; Protocol errors (compression, etc.) - return as INTERNAL
+        (log-msg "gRPC protocol error: ~A" (ag-grpc:grpc-error-message e))
+        (values nil nil nil
+                ag-grpc:+grpc-status-internal+
+                (ag-grpc:grpc-error-message e)))
+      (error (e)
+        ;; Any other error (e.g., protobuf deserialization) - return as INTERNAL
+        (log-msg "Call error: ~A" e)
+        (values nil nil nil
+                ag-grpc:+grpc-status-internal+
+                (format nil "~A" e))))))
 
 (defun make-error-response (test-name message)
   "Create an error response for conformance tests."
