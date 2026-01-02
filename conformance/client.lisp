@@ -309,6 +309,132 @@ TIMEOUT-MS - Timeout in milliseconds (0 means no timeout)."
                 ag-grpc:+grpc-status-internal+
                 (format nil "~A" e))))))
 
+(defun run-server-stream-call (conn service method request-messages codec metadata timeout-ms)
+  "Execute a server streaming gRPC call and return all responses.
+TIMEOUT-MS - Timeout in milliseconds (0 means no timeout)."
+  (declare (ignore codec))
+  ;; For server streaming, we expect exactly one request message
+  (let* ((any-msg (first request-messages))
+         ;; Unpack the Any to get the actual request
+         (request-data (slot-value any-msg 'conformance-proto::value))
+         (request (ag-proto:deserialize-from-bytes 'conformance-proto::server-stream-request request-data))
+         ;; Make the actual gRPC call
+         (method-path (format nil "/~A/~A" service method))
+         ;; Convert timeout from ms to seconds, nil if 0
+         (timeout-seconds (when (and timeout-ms (plusp timeout-ms))
+                           (/ timeout-ms 1000.0))))
+    (log-msg "Server stream call to ~A with ~A metadata headers, timeout=~A ms"
+             method-path (ag-grpc:metadata-count metadata) timeout-ms)
+    (handler-case
+        (let ((stream (ag-grpc:call-server-stream conn method-path request
+                                                   :metadata metadata
+                                                   :timeout timeout-seconds
+                                                   :response-type 'conformance-proto::server-stream-response)))
+          ;; Collect all responses - wrap in timeout for client-side deadline enforcement
+          (flet ((receive-all ()
+                   (let ((responses nil))
+                     (loop for response = (ag-grpc:stream-receive-message stream)
+                           while response
+                           do (push response responses))
+                     ;; Finish the stream to get final status
+                     (ag-grpc:stream-finish stream)
+                     (log-msg "Server stream completed, got ~A responses, status=~A"
+                              (length responses) (ag-grpc:stream-call-status stream))
+                     (values (nreverse responses)
+                             (ag-grpc:stream-call-response-headers stream)
+                             (ag-grpc:stream-call-response-trailers stream)
+                             (or (ag-grpc:stream-call-status stream) 0)
+                             (ag-grpc:stream-call-status-message stream)))))
+            (if timeout-seconds
+                (handler-case
+                    (bt2:with-timeout (timeout-seconds)
+                      (receive-all))
+                  (bt2:timeout ()
+                    ;; Cancel the stream and return deadline exceeded
+                    (ag-grpc:channel-cancel-stream conn (ag-grpc::stream-call-stream-id stream))
+                    (log-msg "Server stream deadline exceeded")
+                    (values nil
+                            (ag-grpc:stream-call-response-headers stream)
+                            nil
+                            ag-grpc:+grpc-status-deadline-exceeded+
+                            "Deadline exceeded")))
+                (receive-all))))
+      (ag-grpc:grpc-status-error (e)
+        ;; Return the error status with headers and trailers
+        (log-msg "gRPC status error: code=~A msg=~A"
+                 (ag-grpc:grpc-status-error-code e)
+                 (ag-grpc:grpc-status-error-message e))
+        (values nil
+                (ag-grpc:grpc-status-error-headers e)
+                (ag-grpc:grpc-status-error-trailers e)
+                (ag-grpc:grpc-status-error-code e)
+                (ag-grpc:grpc-status-error-message e)))
+      (ag-grpc:grpc-error (e)
+        ;; Protocol errors - return as INTERNAL
+        (log-msg "gRPC protocol error: ~A" (ag-grpc:grpc-error-message e))
+        (values nil nil nil
+                ag-grpc:+grpc-status-internal+
+                (ag-grpc:grpc-error-message e)))
+      (error (e)
+        ;; Any other error - return as INTERNAL
+        (log-msg "Server stream error: ~A" e)
+        (values nil nil nil
+                ag-grpc:+grpc-status-internal+
+                (format nil "~A" e))))))
+
+(defun run-cancelled-server-stream-call (conn service method request-messages metadata
+                                         cancel-after-close-send-ms cancel-after-responses)
+  "Execute a server streaming gRPC call and cancel it.
+CANCEL-AFTER-CLOSE-SEND-MS - Cancel after this delay (ms) following close-send.
+CANCEL-AFTER-RESPONSES - Cancel after receiving this many responses.
+Returns collected responses and cancelled status."
+  (let* ((any-msg (first request-messages))
+         (request-data (slot-value any-msg 'conformance-proto::value))
+         (request (ag-proto:deserialize-from-bytes 'conformance-proto::server-stream-request request-data))
+         (method-path (format nil "/~A/~A" service method)))
+    (log-msg "Server stream cancellation to ~A, after-close-send=~Ams after-responses=~A"
+             method-path cancel-after-close-send-ms cancel-after-responses)
+    ;; Low-level call: open stream, send request, receive some responses, then cancel
+    (let* ((stream (ag-grpc::channel-new-stream conn))
+           (stream-id (ag-http2:stream-id stream))
+           (responses nil)
+           (headers nil))
+      ;; Send headers
+      (ag-grpc::channel-send-headers conn stream-id method-path
+                                      :metadata metadata
+                                      :timeout nil)
+      ;; Send request with END_STREAM (we're done sending)
+      (let ((request-bytes (ag-proto:serialize-to-bytes request)))
+        (ag-grpc::channel-send-message conn stream-id request-bytes :end-stream t))
+      ;; If cancel-after-close-send, wait and then cancel immediately
+      (when (and cancel-after-close-send-ms (plusp cancel-after-close-send-ms))
+        (sleep (/ cancel-after-close-send-ms 1000.0))
+        (ag-grpc:channel-cancel-stream conn stream-id)
+        (log-msg "Stream ~A cancelled after close-send" stream-id)
+        (return-from run-cancelled-server-stream-call
+          (values nil nil nil ag-grpc:+grpc-status-cancelled+ "Canceled")))
+      ;; If cancel-after-responses, receive that many and then cancel
+      (when (and cancel-after-responses (plusp cancel-after-responses))
+        ;; Receive headers first
+        (setf headers (ag-grpc::channel-receive-headers conn stream-id))
+        ;; Receive the specified number of responses
+        (loop repeat cancel-after-responses
+              for data = (ag-grpc::channel-receive-message conn stream-id)
+              while data
+              do (push (ag-proto:deserialize-from-bytes
+                        'conformance-proto::server-stream-response data)
+                       responses))
+        ;; Cancel the stream
+        (ag-grpc:channel-cancel-stream conn stream-id)
+        (log-msg "Stream ~A cancelled after ~A responses" stream-id (length responses))
+        (return-from run-cancelled-server-stream-call
+          (values (nreverse responses) headers nil
+                  ag-grpc:+grpc-status-cancelled+ "Canceled")))
+      ;; Default: cancel immediately after close-send
+      (ag-grpc:channel-cancel-stream conn stream-id)
+      (log-msg "Stream ~A cancelled immediately" stream-id)
+      (values nil nil nil ag-grpc:+grpc-status-cancelled+ "Canceled"))))
+
 (defun make-error-response (test-name message)
   "Create an error response for conformance tests."
   (let ((resp (make-instance 'client-compat-response
@@ -368,13 +494,12 @@ Handles edge cases where headers might be malformed."
   "Execute a conformance test request and return a response."
   (let ((test-name (slot-value request 'conformance-proto::test-name)))
     (handler-case
-        (progn
-          ;; Only support unary for now (stream-type = 1)
-          (let ((stream-type (slot-value request 'conformance-proto::stream-type)))
-            (unless (= stream-type 1)
-              (return-from execute-request
-                (make-error-response test-name
-                  (format nil "Unsupported stream type: ~A" stream-type)))))
+        (let ((stream-type (slot-value request 'conformance-proto::stream-type)))
+          ;; Support unary (1) and server streaming (3)
+          (unless (member stream-type '(1 3))
+            (return-from execute-request
+              (make-error-response test-name
+                (format nil "Unsupported stream type: ~A" stream-type))))
           ;; Create connection and execute
           (let* ((service (slot-value request 'conformance-proto::service))
                  (method (slot-value request 'conformance-proto::proto-method))
@@ -386,46 +511,87 @@ Handles edge cases where headers might be malformed."
                  (metadata (convert-request-headers request-headers test-name))
                  (conn (make-grpc-connection request)))
             (unwind-protect
-                (multiple-value-bind (response headers trailers status-code status-msg)
-                    ;; Check if this is a cancellation test
-                    (if cancel
-                        ;; Get cancel timing - after_close_send_ms is most common for unary
-                        (let ((cancel-after-ms
-                                (let ((timing-case (slot-value cancel 'conformance-proto::cancel-timing-case)))
-                                  (case timing-case
-                                    (:after-close-send-ms
-                                     (slot-value cancel 'conformance-proto::after-close-send-ms))
-                                    ;; For any other timing or no timing, cancel immediately
-                                    (otherwise 0)))))
-                          (run-cancelled-unary-call conn service method request-messages metadata cancel-after-ms))
-                        ;; Normal call
-                        (run-unary-call conn service method request-messages codec metadata timeout-ms))
-                  ;; Build the response - always use ClientResponseResult
-                  ;; ClientErrorResult is only for client-side failures, not gRPC errors
-                  (let ((result (make-instance 'client-response-result
-                                  :response-headers (convert-headers headers)
-                                  :response-trailers (convert-headers trailers))))
-                    ;; Add payload if we have a successful response
-                    ;; The response's payload slot contains a ConformancePayload object
-                    ;; For empty responses, payload might be nil but we still need to return
-                    ;; an empty ConformancePayload to indicate we got a response
-                    (when (and response (zerop status-code))
-                      (let ((payload (or (slot-value response 'conformance-proto::payload)
-                                         (make-instance 'conformance-payload))))
-                        (setf (slot-value result 'conformance-proto::payloads) (list payload))))
-                    ;; Add error info if non-zero status
-                    (when (and status-code (not (zerop status-code)))
-                      (let* ((error-details (extract-error-details trailers))
-                             (err (make-instance 'proto-error
-                                    :code status-code
-                                    :message (or status-msg "")
-                                    :details error-details)))
-                        (setf (slot-value result 'conformance-proto::proto-error) err)))
-                    (make-success-response test-name result)))
+                (case stream-type
+                  ;; Unary RPC (stream-type = 1)
+                  (1 (execute-unary-request conn service method request-messages
+                                            codec metadata timeout-ms cancel test-name))
+                  ;; Server streaming RPC (stream-type = 3)
+                  (3 (execute-server-stream-request conn service method request-messages
+                                                    codec metadata timeout-ms cancel test-name)))
               (ag-grpc:channel-close conn))))
       (error (e)
         (make-error-response test-name
           (format nil "Client error: ~A" e))))))
+
+(defun execute-unary-request (conn service method request-messages codec metadata timeout-ms cancel test-name)
+  "Execute a unary RPC request."
+  (multiple-value-bind (response headers trailers status-code status-msg)
+      ;; Check if this is a cancellation test
+      (if cancel
+          (let ((cancel-after-ms
+                  (let ((timing-case (slot-value cancel 'conformance-proto::cancel-timing-case)))
+                    (case timing-case
+                      (:after-close-send-ms
+                       (slot-value cancel 'conformance-proto::after-close-send-ms))
+                      (otherwise 0)))))
+            (run-cancelled-unary-call conn service method request-messages metadata cancel-after-ms))
+          (run-unary-call conn service method request-messages codec metadata timeout-ms))
+    ;; Build the response
+    (let ((result (make-instance 'client-response-result
+                    :response-headers (convert-headers headers)
+                    :response-trailers (convert-headers trailers))))
+      ;; Add payload if we have a successful response
+      (when (and response (zerop status-code))
+        (let ((payload (or (slot-value response 'conformance-proto::payload)
+                           (make-instance 'conformance-payload))))
+          (setf (slot-value result 'conformance-proto::payloads) (list payload))))
+      ;; Add error info if non-zero status
+      (when (and status-code (not (zerop status-code)))
+        (let* ((error-details (extract-error-details trailers))
+               (err (make-instance 'proto-error
+                      :code status-code
+                      :message (or status-msg "")
+                      :details error-details)))
+          (setf (slot-value result 'conformance-proto::proto-error) err)))
+      (make-success-response test-name result))))
+
+(defun execute-server-stream-request (conn service method request-messages codec metadata timeout-ms cancel test-name)
+  "Execute a server streaming RPC request."
+  (multiple-value-bind (responses headers trailers status-code status-msg)
+      ;; Check if this is a cancellation test
+      (if cancel
+          (let ((timing-case (slot-value cancel 'conformance-proto::cancel-timing-case)))
+            (case timing-case
+              (:after-close-send-ms
+               (run-cancelled-server-stream-call conn service method request-messages metadata
+                                                 (slot-value cancel 'conformance-proto::after-close-send-ms) nil))
+              (:after-num-responses
+               (run-cancelled-server-stream-call conn service method request-messages metadata
+                                                 nil (slot-value cancel 'conformance-proto::after-num-responses)))
+              (otherwise
+               ;; Default: immediate cancel after close-send
+               (run-cancelled-server-stream-call conn service method request-messages metadata 0 nil))))
+          (run-server-stream-call conn service method request-messages codec metadata timeout-ms))
+    ;; Build the response
+    (let ((result (make-instance 'client-response-result
+                    :response-headers (convert-headers headers)
+                    :response-trailers (convert-headers trailers))))
+      ;; Add payloads from all responses (even if there's an error)
+      (when responses
+        (let ((payloads (mapcar (lambda (resp)
+                                  (or (slot-value resp 'conformance-proto::payload)
+                                      (make-instance 'conformance-payload)))
+                                responses)))
+          (setf (slot-value result 'conformance-proto::payloads) payloads)))
+      ;; Add error info if non-zero status
+      (when (and status-code (not (zerop status-code)))
+        (let* ((error-details (extract-error-details trailers))
+               (err (make-instance 'proto-error
+                      :code status-code
+                      :message (or status-msg "")
+                      :details error-details)))
+          (setf (slot-value result 'conformance-proto::proto-error) err)))
+      (make-success-response test-name result))))
 
 ;;; Main loop
 

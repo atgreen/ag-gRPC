@@ -65,12 +65,16 @@
 
    ;; Server streaming
    #:grpc-server-stream
-   #:call-server-streaming
-   #:stream-read-message
+   #:call-server-stream
+   #:stream-receive-message
+   #:stream-receive-headers
+   #:stream-finish
+   #:stream-call-status
+   #:stream-call-status-message
+   #:stream-call-response-headers
+   #:stream-call-response-trailers
    #:stream-finished-p
-   #:stream-status
-   #:stream-collect-all
-   #:do-stream-messages
+   #:stream-status-ok-p
 
    ;; Client streaming
    #:grpc-client-stream

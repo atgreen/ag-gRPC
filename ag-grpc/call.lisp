@@ -198,6 +198,137 @@ Validates headers, receives body and trailers, extracts status."
     (channel-connect channel)))
 
 ;;;; ========================================================================
+;;;; Server Streaming RPC
+;;;; ========================================================================
+
+(defclass grpc-server-stream ()
+  ((channel :initarg :channel :accessor stream-call-channel)
+   (stream-id :initarg :stream-id :accessor stream-call-stream-id)
+   (method :initarg :method :accessor stream-call-method)
+   (response-headers :initform nil :accessor stream-call-response-headers)
+   (response-trailers :initform nil :accessor stream-call-response-trailers)
+   (status :initform nil :accessor stream-call-status)
+   (status-message :initform nil :accessor stream-call-status-message)
+   (headers-received-p :initform nil :accessor stream-headers-received-p)
+   (finished-p :initform nil :accessor stream-finished-p)
+   (response-type :initarg :response-type :initform nil :accessor stream-call-response-type))
+  (:documentation "Represents a server streaming gRPC call"))
+
+(defun call-server-stream (channel method request &key metadata timeout response-type)
+  "Initiate a server streaming RPC call.
+CHANNEL - The gRPC channel to use
+METHOD - The method path (e.g., \"/package.Service/ServerStream\")
+REQUEST - The request message (a proto-message or byte vector)
+METADATA - Optional call metadata
+TIMEOUT - Optional timeout in seconds
+RESPONSE-TYPE - Optional response type symbol for deserialization
+
+Returns a grpc-server-stream object. Use stream-receive-message to get responses."
+  (ensure-connected channel)
+  (let* ((stream (channel-new-stream channel))
+         (stream-id (ag-http2:stream-id stream))
+         (effective-timeout (or timeout (channel-default-timeout channel)))
+         (server-stream (make-instance 'grpc-server-stream
+                                        :channel channel
+                                        :stream-id stream-id
+                                        :method method
+                                        :response-type response-type)))
+    ;; Send request headers
+    (channel-send-headers channel stream-id method
+                          :metadata metadata
+                          :timeout effective-timeout)
+    ;; Send request message with END_STREAM (single request for server streaming)
+    (let ((request-bytes (if (typep request 'vector)
+                             request
+                             (ag-proto:serialize-to-bytes request))))
+      (channel-send-message channel stream-id request-bytes :end-stream t))
+    server-stream))
+
+(defun stream-receive-headers (server-stream)
+  "Receive and return response headers. Called automatically by stream-receive-message."
+  (unless (stream-headers-received-p server-stream)
+    (let* ((channel (stream-call-channel server-stream))
+           (stream-id (stream-call-stream-id server-stream))
+           (raw-headers (channel-receive-headers channel stream-id)))
+      (setf (stream-call-response-headers server-stream) raw-headers)
+      (setf (stream-headers-received-p server-stream) t)
+      ;; Check HTTP status
+      (let ((status-header (assoc :status raw-headers)))
+        (unless (and status-header (string= (cdr status-header) "200"))
+          (let ((http-status (if status-header
+                                 (parse-integer (cdr status-header) :junk-allowed t)
+                                 0)))
+            (setf (stream-call-status server-stream)
+                  (http-status-to-grpc-status (or http-status 0)))
+            (setf (stream-finished-p server-stream) t)
+            (error 'grpc-status-error
+                   :code (stream-call-status server-stream)
+                   :message (format nil "HTTP ~A" (or http-status "unknown"))
+                   :headers raw-headers
+                   :trailers raw-headers))))))
+  (stream-call-response-headers server-stream))
+
+(defun stream-receive-message (server-stream)
+  "Receive the next message from a server stream.
+Returns the deserialized message, or NIL when the stream is exhausted.
+After NIL is returned, use stream-call-status to check the final status."
+  (when (stream-finished-p server-stream)
+    (return-from stream-receive-message nil))
+  ;; Ensure headers are received first
+  (stream-receive-headers server-stream)
+  (let* ((channel (stream-call-channel server-stream))
+         (stream-id (stream-call-stream-id server-stream))
+         (response-type (stream-call-response-type server-stream)))
+    ;; Try to receive a message
+    (let ((response-data (channel-receive-message channel stream-id)))
+      (if response-data
+          ;; Got a message - deserialize and return
+          (if response-type
+              (ag-proto:deserialize-from-bytes response-type response-data)
+              response-data)
+          ;; No more messages - receive trailers and extract status
+          (progn
+            (stream-finish server-stream)
+            nil)))))
+
+(defun stream-finish (server-stream)
+  "Finish the stream by receiving trailers and extracting status."
+  (unless (stream-finished-p server-stream)
+    (let* ((channel (stream-call-channel server-stream))
+           (stream-id (stream-call-stream-id server-stream)))
+      ;; Receive trailers
+      (let ((raw-trailers (channel-receive-trailers channel stream-id)))
+        (setf (stream-call-response-trailers server-stream) raw-trailers))
+      ;; Extract status from trailers (or headers for trailers-only)
+      (let* ((trailers (stream-call-response-trailers server-stream))
+             (headers (stream-call-response-headers server-stream))
+             (status-trailer (assoc "grpc-status" trailers :test #'string-equal))
+             (status-header (assoc "grpc-status" headers :test #'string-equal)))
+        (cond
+          (status-trailer
+           (setf (stream-call-status server-stream) (parse-integer (cdr status-trailer))))
+          (status-header
+           (setf (stream-call-response-trailers server-stream) headers)
+           (setf (stream-call-status server-stream) (parse-integer (cdr status-header))))
+          (t
+           (setf (stream-call-status server-stream) +grpc-status-internal+)
+           (setf (stream-call-status-message server-stream) "missing grpc-status"))))
+      ;; Extract status message
+      (let ((message-trailer (assoc "grpc-message" (stream-call-response-trailers server-stream)
+                                    :test #'string-equal)))
+        (when message-trailer
+          (setf (stream-call-status-message server-stream)
+                (percent-decode (cdr message-trailer)))))
+      (setf (stream-finished-p server-stream) t)))
+  server-stream)
+
+(defun stream-status-ok-p (server-stream)
+  "Return T if the stream completed successfully."
+  (and (stream-finished-p server-stream)
+       (stream-call-status server-stream)
+       (grpc-status-ok-p (stream-call-status server-stream))))
+
+;;;; ========================================================================
 ;;;; Convenience Functions
 ;;;; ========================================================================
 
@@ -249,170 +380,6 @@ Example: (make-method-path \"helloworld.Greeter\" \"SayHello\")
         (values (subseq trimmed 0 slash-pos)
                 (subseq trimmed (1+ slash-pos)))
         (values trimmed nil))))
-
-;;;; ========================================================================
-;;;; Server Streaming RPC
-;;;; ========================================================================
-
-(defclass grpc-server-stream ()
-  ((call :initarg :call :accessor stream-call
-         :documentation "The underlying gRPC call")
-   (response-type :initarg :response-type :accessor stream-response-type
-                  :initform nil
-                  :documentation "Response type for deserialization")
-   (buffer :initform (make-array 0 :element-type '(unsigned-byte 8)
-                                   :adjustable t :fill-pointer 0)
-           :accessor stream-buffer
-           :documentation "Buffer for partial messages")
-   (finished-p :initform nil :accessor stream-finished-p
-               :documentation "True when stream is complete")
-   (status :initform nil :accessor stream-status
-           :documentation "Final gRPC status (set when stream ends)"))
-  (:documentation "Represents a server streaming response"))
-
-(defun call-server-streaming (channel method request &key metadata timeout response-type)
-  "Initiate a server streaming RPC call.
-CHANNEL - The gRPC channel to use
-METHOD - The method path (e.g., \"/helloworld.Greeter/ListFeatures\")
-REQUEST - The request message (a proto-message or byte vector)
-METADATA - Optional call metadata
-TIMEOUT - Optional timeout in seconds (overrides channel default)
-RESPONSE-TYPE - Response type symbol for deserialization
-
-Returns a grpc-server-stream object. Use stream-read-message to read responses."
-  (ensure-connected channel)
-  (let* ((stream (channel-new-stream channel))
-         (stream-id (ag-http2:stream-id stream))
-         (call (make-instance 'grpc-call
-                              :channel channel
-                              :method method
-                              :stream-id stream-id
-                              :request-metadata metadata)))
-    ;; Send request headers
-    (channel-send-headers channel stream-id method
-                          :metadata metadata
-                          :timeout timeout)
-    ;; Send request message with END_STREAM (client is done sending)
-    (let ((request-bytes (if (typep request 'vector)
-                             request
-                             (ag-proto:serialize-to-bytes request))))
-      (channel-send-message channel stream-id request-bytes :end-stream t))
-    ;; Receive response headers
-    (let ((raw-headers (channel-receive-headers channel stream-id)))
-      (setf (call-response-headers call) raw-headers))
-    ;; Check initial response status
-    (let ((status-header (assoc :status (call-response-headers call))))
-      (unless (and status-header (string= (cdr status-header) "200"))
-        (error 'grpc-status-error
-               :code +grpc-status-unknown+
-               :message "Server returned non-200 status")))
-    ;; Return the stream object
-    (make-instance 'grpc-server-stream
-                   :call call
-                   :response-type response-type)))
-
-(defgeneric stream-read-message (stream)
-  (:documentation "Read the next message from a streaming RPC.
-Returns the deserialized message, or NIL if the stream is finished.
-When the stream ends, also sets stream-status."))
-
-(defmethod stream-read-message ((server-stream grpc-server-stream))
-  "Read the next message from a server stream."
-  (when (stream-finished-p server-stream)
-    (return-from stream-read-message nil))
-  (let* ((call (stream-call server-stream))
-         (channel (call-channel call))
-         (stream-id (call-stream-id call))
-         (conn (channel-connection channel))
-         (h2-stream (ag-http2:multiplexer-get-stream
-                     (ag-http2:connection-multiplexer conn)
-                     stream-id))
-         (buffer (stream-buffer server-stream)))
-    ;; Try to decode a message from the buffer first
-    (multiple-value-bind (data compressed consumed)
-        (decode-grpc-message buffer 0)
-      (declare (ignore compressed))
-      (when data
-        ;; Got a complete message from buffer
-        (let ((remaining (subseq buffer consumed)))
-          (setf (fill-pointer buffer) 0)
-          (loop for byte across remaining
-                do (vector-push-extend byte buffer)))
-        (return-from stream-read-message
-          (if (stream-response-type server-stream)
-              (ag-proto:deserialize-from-bytes (stream-response-type server-stream) data)
-              data))))
-    ;; Need to read more data
-    (loop
-      ;; Check if stream can still receive
-      (unless (ag-http2:stream-can-recv-p h2-stream)
-        ;; Stream is done, extract final status from trailers
-        (let* ((trailers (ag-http2:stream-trailers h2-stream)))
-          (setf (call-response-trailers call) trailers)
-          (let ((status-trailer (assoc "grpc-status" trailers :test #'string-equal)))
-            (setf (stream-status server-stream)
-                  (if status-trailer
-                      (parse-integer (cdr status-trailer))
-                      +grpc-status-ok+))
-            (setf (call-status call) (stream-status server-stream)))
-          ;; Check for any remaining data in buffer
-          (multiple-value-bind (data compressed consumed)
-              (decode-grpc-message buffer 0)
-            (declare (ignore compressed consumed))
-            (when data
-              (return-from stream-read-message
-                (if (stream-response-type server-stream)
-                    (ag-proto:deserialize-from-bytes (stream-response-type server-stream) data)
-                    data))))
-          ;; Mark stream as finished
-          (setf (stream-finished-p server-stream) t)
-          ;; Signal error if not OK
-          (unless (grpc-status-ok-p (stream-status server-stream))
-            (error 'grpc-status-error
-                   :code (stream-status server-stream)
-                   :message (call-status-message call)))
-          (return-from stream-read-message nil)))
-      ;; Read a frame
-      (ag-http2:connection-read-frame conn)
-      ;; Copy any new data to our buffer
-      (let ((new-data (ag-http2:stream-consume-data h2-stream)))
-        (loop for byte across new-data
-              do (vector-push-extend byte buffer)))
-      ;; Try to decode a message
-      (multiple-value-bind (data compressed consumed)
-          (decode-grpc-message buffer 0)
-        (declare (ignore compressed))
-        (when data
-          ;; Got a complete message
-          (let ((remaining (subseq buffer consumed)))
-            (setf (fill-pointer buffer) 0)
-            (loop for byte across remaining
-                  do (vector-push-extend byte buffer)))
-          (return-from stream-read-message
-            (if (stream-response-type server-stream)
-                (ag-proto:deserialize-from-bytes (stream-response-type server-stream) data)
-                data)))))))
-
-(defmacro do-stream-messages ((var server-stream &optional result) &body body)
-  "Iterate over all messages in a server stream.
-VAR is bound to each message in turn.
-Returns RESULT (default NIL) when the stream is exhausted.
-
-Example:
-  (do-stream-messages (msg stream)
-    (format t \"Got: ~A~%\" msg))"
-  (let ((stream-var (gensym "STREAM")))
-    `(let ((,stream-var ,server-stream))
-       (loop for ,var = (stream-read-message ,stream-var)
-             while ,var
-             do (progn ,@body)
-             finally (return ,result)))))
-
-(defun stream-collect-all (server-stream)
-  "Read all messages from a server stream and return them as a list."
-  (let ((messages nil))
-    (do-stream-messages (msg server-stream (nreverse messages))
-      (push msg messages))))
 
 ;;;; ========================================================================
 ;;;; Client Streaming RPC
@@ -800,5 +767,5 @@ Example:
     (do-stream-messages (item stream)
       (process item)))"
   (declare (ignore metadata timeout response-type))
-  `(let ((,var (call-server-streaming ,channel ,method ,request ,@args)))
+  `(let ((,var (call-server-stream ,channel ,method ,request ,@args)))
      ,@body))
