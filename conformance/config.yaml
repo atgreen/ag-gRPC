@@ -7,6 +7,7 @@ features:
     - CODEC_PROTO
   compressions:
     - COMPRESSION_IDENTITY
+    - COMPRESSION_GZIP
   stream_types:
     - STREAM_TYPE_UNARY
     - STREAM_TYPE_CLIENT_STREAM

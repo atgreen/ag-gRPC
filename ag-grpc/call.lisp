@@ -3,6 +3,20 @@
 (in-package #:ag-grpc)
 
 ;;;; ========================================================================
+;;;; Helper Functions
+;;;; ========================================================================
+
+(defun get-response-encoding (headers)
+  "Extract the grpc-encoding value from response headers.
+Returns the encoding string (e.g., \"gzip\") or NIL if not present/identity."
+  (let ((encoding-header (assoc "grpc-encoding" headers :test #'string-equal)))
+    (when encoding-header
+      (let ((encoding (cdr encoding-header)))
+        ;; "identity" means no compression, treat as nil
+        (unless (string-equal encoding "identity")
+          encoding)))))
+
+;;;; ========================================================================
 ;;;; gRPC Call Object
 ;;;; ========================================================================
 
@@ -124,8 +138,10 @@ Validates headers, receives body and trailers, extracts status."
     ;; to check if there's also a body or separate trailers, which take precedence.
     ;; So we don't return early here; we always try to receive body and trailers.
 
-    ;; Receive response message (may be nil)
-    (let ((response-data (channel-receive-message channel stream-id)))
+    ;; Get response encoding for decompression
+    (let* ((encoding (get-response-encoding (call-response-headers call)))
+           ;; Receive response message (may be nil)
+           (response-data (channel-receive-message channel stream-id encoding)))
       (when response-data
         (setf (call-response call)
               (if response-type
@@ -278,9 +294,10 @@ After NIL is returned, use stream-call-status to check the final status."
   (stream-receive-headers server-stream)
   (let* ((channel (stream-call-channel server-stream))
          (stream-id (stream-call-stream-id server-stream))
-         (response-type (stream-call-response-type server-stream)))
+         (response-type (stream-call-response-type server-stream))
+         (encoding (get-response-encoding (stream-call-response-headers server-stream))))
     ;; Try to receive a message
-    (let ((response-data (channel-receive-message channel stream-id)))
+    (let ((response-data (channel-receive-message channel stream-id encoding)))
       (if response-data
           ;; Got a message - deserialize and return
           (if response-type
@@ -471,8 +488,10 @@ Returns (values response status) where response is the deserialized message."
         (setf (call-status call) +grpc-status-unknown+)
         (return-from stream-close-and-recv
           (values nil (call-status call)))))
-    ;; Receive response message
-    (let ((response-data (channel-receive-message channel stream-id)))
+    ;; Get response encoding for decompression
+    (let* ((encoding (get-response-encoding (call-response-headers call)))
+           ;; Receive response message
+           (response-data (channel-receive-message channel stream-id encoding)))
       (when response-data
         (setf (call-response call)
               (if (client-stream-response-type client-stream)
@@ -650,22 +669,24 @@ When the stream ends, also sets stream-status."
           (setf (stream-status bidi-stream) +grpc-status-unknown+)
           (setf (bidi-stream-recv-finished-p bidi-stream) t)
           (return-from stream-read-message nil))))
-    ;; Try to decode a message from the buffer first
-    (multiple-value-bind (data compressed consumed)
-        (decode-grpc-message buffer 0)
-      (declare (ignore compressed))
-      (when data
-        ;; Got a complete message from buffer
-        (let ((remaining (subseq buffer consumed)))
-          (setf (fill-pointer buffer) 0)
-          (loop for byte across remaining
-                do (vector-push-extend byte buffer)))
-        (return-from stream-read-message
-          (if (bidi-stream-response-type bidi-stream)
-              (ag-proto:deserialize-from-bytes (bidi-stream-response-type bidi-stream) data)
-              data))))
-    ;; Need to read more data
-    (loop
+    ;; Get response encoding for decompression
+    (let ((encoding (get-response-encoding (call-response-headers call))))
+      ;; Try to decode a message from the buffer first
+      (multiple-value-bind (data compressed consumed)
+          (decode-grpc-message buffer 0 encoding)
+        (declare (ignore compressed))
+        (when data
+          ;; Got a complete message from buffer
+          (let ((remaining (subseq buffer consumed)))
+            (setf (fill-pointer buffer) 0)
+            (loop for byte across remaining
+                  do (vector-push-extend byte buffer)))
+          (return-from stream-read-message
+            (if (bidi-stream-response-type bidi-stream)
+                (ag-proto:deserialize-from-bytes (bidi-stream-response-type bidi-stream) data)
+                data))))
+      ;; Need to read more data
+      (loop
       ;; Check if stream can still receive
       (unless (ag-http2:stream-can-recv-p h2-stream)
         ;; Stream is done, extract final status from trailers
@@ -679,7 +700,7 @@ When the stream ends, also sets stream-status."
             (setf (call-status call) (stream-status bidi-stream)))
           ;; Check for any remaining data in buffer
           (multiple-value-bind (data compressed consumed)
-              (decode-grpc-message buffer 0)
+              (decode-grpc-message buffer 0 encoding)
             (declare (ignore compressed consumed))
             (when data
               (return-from stream-read-message
@@ -709,7 +730,7 @@ When the stream ends, also sets stream-status."
               do (vector-push-extend byte buffer)))
       ;; Try to decode a message
       (multiple-value-bind (data compressed consumed)
-          (decode-grpc-message buffer 0)
+          (decode-grpc-message buffer 0 encoding)
         (declare (ignore compressed))
         (when data
           ;; Got a complete message
@@ -720,7 +741,7 @@ When the stream ends, also sets stream-status."
           (return-from stream-read-message
             (if (bidi-stream-response-type bidi-stream)
                 (ag-proto:deserialize-from-bytes (bidi-stream-response-type bidi-stream) data)
-                data)))))))
+                data))))))))
 
 (defmacro do-bidi-recv ((var bidi-stream &optional result) &body body)
   "Iterate over all received messages in a bidirectional stream.

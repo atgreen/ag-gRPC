@@ -211,20 +211,23 @@ Skips pseudo-headers and standard gRPC headers."
 (defparameter *grpc-encoding* "identity"
   "Request encoding name")
 
-(defparameter *grpc-accept-encoding* "identity"
+(defparameter *grpc-accept-encoding* "identity,gzip"
   "Accepted response encoding(s)")
 
 (defun make-request-headers (method &key timeout metadata authority tls)
   "Create standard gRPC request headers.
    If TLS is true, use https scheme."
-  (let ((headers (list (cons :method "POST")
+  ;; Check if metadata overrides grpc-encoding
+  (let* ((custom-encoding (and metadata
+                               (metadata-get metadata "grpc-encoding")))
+         (headers (list (cons :method "POST")
                        (cons :scheme (if tls "https" "http"))
                        (cons :path method)
                        (cons :authority (or authority ""))
                        (cons "content-type" *grpc-content-type*)
                        (cons "te" "trailers")
                        (cons "user-agent" *grpc-user-agent*)
-                       (cons "grpc-encoding" *grpc-encoding*)
+                       (cons "grpc-encoding" (or custom-encoding *grpc-encoding*))
                        (cons "grpc-accept-encoding" *grpc-accept-encoding*))))
     ;; Pseudo-headers must appear before regular headers, so only append extras.
     (when timeout
@@ -234,11 +237,13 @@ Skips pseudo-headers and standard gRPC headers."
       (dolist (entry (metadata-entries metadata))
         (let ((key (car entry))
               (value (cdr entry)))
-          ;; Binary metadata keys (ending in -bin) must be base64 encoded
-          (if (binary-metadata-key-p key)
-              (setf headers (append headers
-                                    (list (cons key (encode-binary-metadata value)))))
-              (setf headers (append headers (list entry)))))))
+          ;; Skip grpc-encoding since we already handled it above
+          (unless (string-equal key "grpc-encoding")
+            ;; Binary metadata keys (ending in -bin) must be base64 encoded
+            (if (binary-metadata-key-p key)
+                (setf headers (append headers
+                                      (list (cons key (encode-binary-metadata value)))))
+                (setf headers (append headers (list entry))))))))
     headers))
 
 (defun make-response-headers (&key metadata)

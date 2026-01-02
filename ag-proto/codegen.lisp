@@ -388,10 +388,17 @@ ONEOFS is the list of oneof descriptors for the message."
 (defun read-varint (buffer)
   "Read a varint from a buffer (vector with position tracking).
    Buffer should be a cons of (vector . position)."
-  (let ((result 0)
-        (shift 0)
-        (data (car buffer))
-        (pos (cdr buffer)))
+  (let* ((result 0)
+         (shift 0)
+         (raw-data (car buffer))
+         ;; Ensure data is a simple array for SBCL optimization
+         (data (if (typep raw-data '(simple-array (unsigned-byte 8) (*)))
+                   raw-data
+                   (let ((simple (make-array (length raw-data) :element-type '(unsigned-byte 8))))
+                     (replace simple raw-data)
+                     (setf (car buffer) simple)
+                     simple)))
+         (pos (cdr buffer)))
     (loop
       (when (>= pos (length data))
         (error "Unexpected end of buffer reading varint"))

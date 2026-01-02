@@ -230,9 +230,10 @@ Also adds the x-test-case-name header."
           (ag-grpc:metadata-add metadata name v))))
     metadata))
 
-(defun run-cancelled-unary-call (conn service method request-messages metadata cancel-after-ms)
+(defun run-cancelled-unary-call (conn service method request-messages metadata cancel-after-ms &optional encoding)
   "Execute a unary gRPC call and then cancel it.
 CANCEL-AFTER-MS - Delay before cancellation (0 = immediate).
+ENCODING - Compression encoding to use.
 Returns a cancelled status result."
   ;; Get the actual request
   (let* ((any-msg (first request-messages))
@@ -249,7 +250,9 @@ Returns a cancelled status result."
                                       :timeout nil)
       ;; Send request with END_STREAM
       (let ((request-bytes (ag-proto:serialize-to-bytes request)))
-        (ag-grpc::channel-send-message conn stream-id request-bytes :end-stream t))
+        (ag-grpc::channel-send-message conn stream-id request-bytes
+                                        :end-stream t
+                                        :encoding encoding))
       ;; Wait if needed
       (when (and cancel-after-ms (plusp cancel-after-ms))
         (sleep (/ cancel-after-ms 1000.0)))
@@ -259,9 +262,69 @@ Returns a cancelled status result."
       ;; Return cancelled status
       (values nil nil nil ag-grpc:+grpc-status-cancelled+ "Canceled"))))
 
-(defun run-unary-call (conn service method request-messages codec metadata timeout-ms)
+(defun run-compressed-unary-call (conn method-path request metadata timeout-seconds encoding)
+  "Execute a unary gRPC call with compression using low-level APIs.
+Returns (values response headers trailers status-code status-message)."
+  (ag-grpc::ensure-connected conn)
+  (let* ((stream (ag-grpc::channel-new-stream conn))
+         (stream-id (ag-http2:stream-id stream)))
+    ;; Send headers
+    (ag-grpc::channel-send-headers conn stream-id method-path
+                                    :metadata metadata
+                                    :timeout timeout-seconds)
+    ;; Send request with compression
+    (let ((request-bytes (ag-proto:serialize-to-bytes request)))
+      (ag-grpc::channel-send-message conn stream-id request-bytes
+                                      :end-stream t
+                                      :encoding encoding))
+    ;; Receive response headers
+    (let ((raw-headers (ag-grpc::channel-receive-headers conn stream-id)))
+      ;; Check HTTP status
+      (let ((status-header (assoc :status raw-headers)))
+        (unless (and status-header (string= (cdr status-header) "200"))
+          (let ((http-status (if status-header (parse-integer (cdr status-header) :junk-allowed t) 0)))
+            (return-from run-compressed-unary-call
+              (values nil raw-headers raw-headers
+                      (ag-grpc::http-status-to-grpc-status (or http-status 0))
+                      (format nil "HTTP ~A" (or http-status "unknown")))))))
+      ;; Get response encoding for decompression
+      (let* ((response-encoding (ag-grpc::get-response-encoding raw-headers))
+             (response-data (ag-grpc::channel-receive-message conn stream-id response-encoding))
+             (response (when response-data
+                         (ag-proto:deserialize-from-bytes 'unary-response response-data))))
+        ;; Receive trailers
+        (let ((raw-trailers (ag-grpc::channel-receive-trailers conn stream-id)))
+          ;; Extract status
+          (let* ((status-trailer (assoc "grpc-status" raw-trailers :test #'string-equal))
+                 (status-header (assoc "grpc-status" raw-headers :test #'string-equal))
+                 (status-code (cond
+                                (status-trailer (parse-integer (cdr status-trailer)))
+                                (status-header (parse-integer (cdr status-header)))
+                                (t ag-grpc:+grpc-status-internal+)))
+                 (message-trailer (assoc "grpc-message" (or raw-trailers raw-headers)
+                                         :test #'string-equal))
+                 (status-message (when message-trailer
+                                   (ag-grpc::percent-decode (cdr message-trailer)))))
+            ;; Signal error if not OK
+            (unless (zerop status-code)
+              (error 'ag-grpc:grpc-status-error
+                     :code status-code
+                     :message status-message
+                     :headers raw-headers
+                     :trailers raw-trailers))
+            ;; Check for missing response
+            (when (and (zerop status-code) (null response))
+              (error 'ag-grpc:grpc-status-error
+                     :code ag-grpc:+grpc-status-unimplemented+
+                     :message "OK status but no response message"
+                     :headers raw-headers
+                     :trailers raw-trailers))
+            (values response raw-headers raw-trailers status-code status-message)))))))
+
+(defun run-unary-call (conn service method request-messages codec metadata timeout-ms &optional encoding)
   "Execute a unary gRPC call and return the response.
-TIMEOUT-MS - Timeout in milliseconds (0 means no timeout)."
+TIMEOUT-MS - Timeout in milliseconds (0 means no timeout).
+ENCODING - Compression encoding to use (e.g., \"gzip\")."
   (declare (ignore codec))
   ;; For unary, we expect exactly one request message
   (let* ((any-msg (first request-messages))
@@ -273,19 +336,22 @@ TIMEOUT-MS - Timeout in milliseconds (0 means no timeout)."
          ;; Convert timeout from ms to seconds, nil if 0
          (timeout-seconds (when (and timeout-ms (plusp timeout-ms))
                            (/ timeout-ms 1000.0))))
-    (log-msg "Calling ~A with ~A metadata headers, timeout=~A ms"
-             method-path (ag-grpc:metadata-count metadata) timeout-ms)
+    (log-msg "Calling ~A with ~A metadata headers, timeout=~A ms, encoding=~A"
+             method-path (ag-grpc:metadata-count metadata) timeout-ms encoding)
     (handler-case
-        (let ((call (ag-grpc:call-unary conn method-path request
-                                        :metadata metadata
-                                        :timeout timeout-seconds
-                                        :response-type 'unary-response)))
-          (log-msg "Call completed, status=~A" (ag-grpc:call-status call))
-          (values (ag-grpc:call-response call)
-                  (ag-grpc::call-response-headers call)
-                  (ag-grpc::call-response-trailers call)
-                  (or (ag-grpc:call-status call) 0)
-                  (ag-grpc::call-status-message call)))
+        ;; Use low-level API when compression is needed
+        (if encoding
+            (run-compressed-unary-call conn method-path request metadata timeout-seconds encoding)
+            (let ((call (ag-grpc:call-unary conn method-path request
+                                            :metadata metadata
+                                            :timeout timeout-seconds
+                                            :response-type 'unary-response)))
+              (log-msg "Call completed, status=~A" (ag-grpc:call-status call))
+              (values (ag-grpc:call-response call)
+                      (ag-grpc::call-response-headers call)
+                      (ag-grpc::call-response-trailers call)
+                      (or (ag-grpc:call-status call) 0)
+                      (ag-grpc::call-status-message call))))
       (ag-grpc:grpc-status-error (e)
         ;; Return the error status with headers and trailers
         (log-msg "gRPC status error: code=~A msg=~A"
@@ -309,10 +375,11 @@ TIMEOUT-MS - Timeout in milliseconds (0 means no timeout)."
                 ag-grpc:+grpc-status-internal+
                 (format nil "~A" e))))))
 
-(defun run-server-stream-call (conn service method request-messages codec metadata timeout-ms)
+(defun run-server-stream-call (conn service method request-messages codec metadata timeout-ms &optional encoding)
   "Execute a server streaming gRPC call and return all responses.
-TIMEOUT-MS - Timeout in milliseconds (0 means no timeout)."
-  (declare (ignore codec))
+TIMEOUT-MS - Timeout in milliseconds (0 means no timeout).
+ENCODING - Compression encoding to use."
+  (declare (ignore codec encoding))  ; TODO: implement compression for streaming
   ;; For server streaming, we expect exactly one request message
   (let* ((any-msg (first request-messages))
          ;; Unpack the Any to get the actual request
@@ -383,11 +450,13 @@ TIMEOUT-MS - Timeout in milliseconds (0 means no timeout)."
                 (format nil "~A" e))))))
 
 (defun run-cancelled-server-stream-call (conn service method request-messages metadata
-                                         cancel-after-close-send-ms cancel-after-responses)
+                                         cancel-after-close-send-ms cancel-after-responses &optional encoding)
   "Execute a server streaming gRPC call and cancel it.
 CANCEL-AFTER-CLOSE-SEND-MS - Cancel after this delay (ms) following close-send.
+ENCODING - Compression encoding to use.
 CANCEL-AFTER-RESPONSES - Cancel after receiving this many responses.
 Returns collected responses and cancelled status."
+  (declare (ignore encoding))  ; Encoding is for request; we get response encoding from headers
   (let* ((any-msg (first request-messages))
          (request-data (slot-value any-msg 'conformance-proto::value))
          (request (ag-proto:deserialize-from-bytes 'conformance-proto::server-stream-request request-data))
@@ -398,7 +467,8 @@ Returns collected responses and cancelled status."
     (let* ((stream (ag-grpc::channel-new-stream conn))
            (stream-id (ag-http2:stream-id stream))
            (responses nil)
-           (headers nil))
+           (headers nil)
+           (response-encoding nil))
       ;; Send headers
       (ag-grpc::channel-send-headers conn stream-id method-path
                                       :metadata metadata
@@ -417,9 +487,11 @@ Returns collected responses and cancelled status."
       (when (and cancel-after-responses (plusp cancel-after-responses))
         ;; Receive headers first
         (setf headers (ag-grpc::channel-receive-headers conn stream-id))
+        ;; Extract response encoding for decompression
+        (setf response-encoding (ag-grpc::get-response-encoding headers))
         ;; Receive the specified number of responses
         (loop repeat cancel-after-responses
-              for data = (ag-grpc::channel-receive-message conn stream-id)
+              for data = (ag-grpc::channel-receive-message conn stream-id response-encoding)
               while data
               do (push (ag-proto:deserialize-from-bytes
                         'conformance-proto::server-stream-response data)
@@ -439,10 +511,11 @@ Returns collected responses and cancelled status."
 ;;; Client Streaming RPC
 ;;; ============================================================================
 
-(defun run-client-stream-call (conn service method request-messages codec metadata timeout-ms)
+(defun run-client-stream-call (conn service method request-messages codec metadata timeout-ms &optional encoding)
   "Execute a client streaming gRPC call and return the response.
-TIMEOUT-MS - Timeout in milliseconds (0 means no timeout)."
-  (declare (ignore codec))
+TIMEOUT-MS - Timeout in milliseconds (0 means no timeout).
+ENCODING - Compression encoding to use."
+  (declare (ignore codec encoding))  ; TODO: implement compression for streaming
   (let* ((method-path (format nil "/~A/~A" service method))
          (timeout-seconds (when (and timeout-ms (plusp timeout-ms))
                            (/ timeout-ms 1000.0))))
@@ -502,10 +575,12 @@ TIMEOUT-MS - Timeout in milliseconds (0 means no timeout)."
                 (format nil "~A" e))))))
 
 (defun run-cancelled-client-stream-call (conn service method request-messages metadata
-                                         cancel-before-close-send cancel-after-close-send-ms)
+                                         cancel-before-close-send cancel-after-close-send-ms &optional encoding)
   "Execute a client streaming gRPC call and cancel it.
 CANCEL-BEFORE-CLOSE-SEND - If true, cancel before closing the send side.
-CANCEL-AFTER-CLOSE-SEND-MS - Cancel after this delay (ms) following close-send."
+CANCEL-AFTER-CLOSE-SEND-MS - Cancel after this delay (ms) following close-send.
+ENCODING - Compression encoding to use."
+  (declare (ignore encoding))  ; TODO: implement compression
   (let ((method-path (format nil "/~A/~A" service method)))
     (log-msg "Client stream cancellation to ~A, before-close-send=~A after-close-send-ms=~A"
              method-path cancel-before-close-send cancel-after-close-send-ms)
@@ -548,12 +623,13 @@ CANCEL-AFTER-CLOSE-SEND-MS - Cancel after this delay (ms) following close-send."
 ;;; Bidirectional Streaming RPC
 ;;; ============================================================================
 
-(defun run-bidi-stream-call (conn service method request-messages codec metadata timeout-ms full-duplex)
+(defun run-bidi-stream-call (conn service method request-messages codec metadata timeout-ms full-duplex &optional encoding)
   "Execute a bidirectional streaming gRPC call.
 REQUEST-MESSAGES - List of request messages to send
 FULL-DUPLEX - If true, interleave sends and receives; otherwise send all then receive all
-TIMEOUT-MS - Timeout in milliseconds (0 means no timeout)."
-  (declare (ignore codec))
+TIMEOUT-MS - Timeout in milliseconds (0 means no timeout).
+ENCODING - Compression encoding to use."
+  (declare (ignore codec encoding))  ; TODO: implement compression
   (let* ((method-path (format nil "/~A/~A" service method))
          (timeout-seconds (when (and timeout-ms (plusp timeout-ms))
                            (/ timeout-ms 1000.0))))
@@ -646,15 +722,18 @@ TIMEOUT-MS - Timeout in milliseconds (0 means no timeout)."
 
 (defun run-cancelled-bidi-stream-call (conn service method request-messages metadata
                                        cancel-before-close-send cancel-after-close-send-ms
-                                       cancel-after-responses)
-  "Execute a bidirectional streaming gRPC call and cancel it."
+                                       cancel-after-responses &optional encoding)
+  "Execute a bidirectional streaming gRPC call and cancel it.
+ENCODING - Compression encoding to use."
+  (declare (ignore encoding))  ; Encoding is for request; we get response encoding from headers
   (let ((method-path (format nil "/~A/~A" service method)))
     (log-msg "Bidi stream cancellation to ~A, before-close-send=~A after-close-send-ms=~A after-responses=~A"
              method-path cancel-before-close-send cancel-after-close-send-ms cancel-after-responses)
     (let* ((h2-stream (ag-grpc::channel-new-stream conn))
            (stream-id (ag-http2:stream-id h2-stream))
            (responses nil)
-           (headers nil))
+           (headers nil)
+           (response-encoding nil))
       ;; Send headers (NOT end-stream)
       (ag-grpc::channel-send-headers conn stream-id method-path
                                       :metadata metadata
@@ -681,8 +760,10 @@ TIMEOUT-MS - Timeout in milliseconds (0 means no timeout)."
       ;; Cancel after receiving N responses
       (when (and cancel-after-responses (plusp cancel-after-responses))
         (setf headers (ag-grpc::channel-receive-headers conn stream-id))
+        ;; Extract response encoding for decompression
+        (setf response-encoding (ag-grpc::get-response-encoding headers))
         (loop repeat cancel-after-responses
-              for data = (ag-grpc::channel-receive-message conn stream-id)
+              for data = (ag-grpc::channel-receive-message conn stream-id response-encoding)
               while data
               do (push (ag-proto:deserialize-from-bytes
                         'conformance-proto::bidi-stream-response data)
@@ -773,28 +854,36 @@ Handles edge cases where headers might be malformed."
                  (codec (slot-value request 'conformance-proto::codec))
                  (timeout-ms (slot-value request 'conformance-proto::timeout-ms))
                  (cancel (slot-value request 'conformance-proto::cancel))
+                 (compression (slot-value request 'conformance-proto::compression))
+                 ;; Convert compression enum to encoding string
+                 (encoding (case compression
+                             (2 "gzip")   ; COMPRESSION_GZIP
+                             (t nil)))    ; COMPRESSION_IDENTITY or unspecified
                  (metadata (convert-request-headers request-headers test-name))
                  (conn (make-grpc-connection request)))
+            ;; Set grpc-encoding header if using compression
+            (when encoding
+              (ag-grpc:metadata-set metadata "grpc-encoding" encoding))
             (unwind-protect
                 (case stream-type
                   ;; Unary RPC (stream-type = 1)
                   (1 (execute-unary-request conn service method request-messages
-                                            codec metadata timeout-ms cancel test-name))
+                                            codec metadata timeout-ms cancel test-name encoding))
                   ;; Client streaming RPC (stream-type = 2)
                   (2 (execute-client-stream-request conn service method request-messages
-                                                    codec metadata timeout-ms cancel test-name))
+                                                    codec metadata timeout-ms cancel test-name encoding))
                   ;; Server streaming RPC (stream-type = 3)
                   (3 (execute-server-stream-request conn service method request-messages
-                                                    codec metadata timeout-ms cancel test-name))
+                                                    codec metadata timeout-ms cancel test-name encoding))
                   ;; Bidirectional streaming RPC (stream-type = 4)
                   (4 (execute-bidi-stream-request conn service method request-messages
-                                                  codec metadata timeout-ms cancel test-name)))
+                                                  codec metadata timeout-ms cancel test-name encoding)))
               (ag-grpc:channel-close conn))))
       (error (e)
         (make-error-response test-name
           (format nil "Client error: ~A" e))))))
 
-(defun execute-unary-request (conn service method request-messages codec metadata timeout-ms cancel test-name)
+(defun execute-unary-request (conn service method request-messages codec metadata timeout-ms cancel test-name &optional encoding)
   "Execute a unary RPC request."
   (multiple-value-bind (response headers trailers status-code status-msg)
       ;; Check if this is a cancellation test
@@ -805,8 +894,8 @@ Handles edge cases where headers might be malformed."
                       (:after-close-send-ms
                        (slot-value cancel 'conformance-proto::after-close-send-ms))
                       (otherwise 0)))))
-            (run-cancelled-unary-call conn service method request-messages metadata cancel-after-ms))
-          (run-unary-call conn service method request-messages codec metadata timeout-ms))
+            (run-cancelled-unary-call conn service method request-messages metadata cancel-after-ms encoding))
+          (run-unary-call conn service method request-messages codec metadata timeout-ms encoding))
     ;; Build the response
     (let ((result (make-instance 'client-response-result
                     :response-headers (convert-headers headers)
@@ -826,7 +915,7 @@ Handles edge cases where headers might be malformed."
           (setf (slot-value result 'conformance-proto::proto-error) err)))
       (make-success-response test-name result))))
 
-(defun execute-server-stream-request (conn service method request-messages codec metadata timeout-ms cancel test-name)
+(defun execute-server-stream-request (conn service method request-messages codec metadata timeout-ms cancel test-name &optional encoding)
   "Execute a server streaming RPC request."
   (multiple-value-bind (responses headers trailers status-code status-msg)
       ;; Check if this is a cancellation test
@@ -835,14 +924,14 @@ Handles edge cases where headers might be malformed."
             (case timing-case
               (:after-close-send-ms
                (run-cancelled-server-stream-call conn service method request-messages metadata
-                                                 (slot-value cancel 'conformance-proto::after-close-send-ms) nil))
+                                                 (slot-value cancel 'conformance-proto::after-close-send-ms) nil encoding))
               (:after-num-responses
                (run-cancelled-server-stream-call conn service method request-messages metadata
-                                                 nil (slot-value cancel 'conformance-proto::after-num-responses)))
+                                                 nil (slot-value cancel 'conformance-proto::after-num-responses) encoding))
               (otherwise
                ;; Default: immediate cancel after close-send
-               (run-cancelled-server-stream-call conn service method request-messages metadata 0 nil))))
-          (run-server-stream-call conn service method request-messages codec metadata timeout-ms))
+               (run-cancelled-server-stream-call conn service method request-messages metadata 0 nil encoding))))
+          (run-server-stream-call conn service method request-messages codec metadata timeout-ms encoding))
     ;; Build the response
     (let ((result (make-instance 'client-response-result
                     :response-headers (convert-headers headers)
@@ -864,7 +953,7 @@ Handles edge cases where headers might be malformed."
           (setf (slot-value result 'conformance-proto::proto-error) err)))
       (make-success-response test-name result))))
 
-(defun execute-client-stream-request (conn service method request-messages codec metadata timeout-ms cancel test-name)
+(defun execute-client-stream-request (conn service method request-messages codec metadata timeout-ms cancel test-name &optional encoding)
   "Execute a client streaming RPC request."
   (multiple-value-bind (response headers trailers status-code status-msg)
       ;; Check if this is a cancellation test
@@ -872,14 +961,14 @@ Handles edge cases where headers might be malformed."
           (let ((timing-case (slot-value cancel 'conformance-proto::cancel-timing-case)))
             (case timing-case
               (:before-close-send
-               (run-cancelled-client-stream-call conn service method request-messages metadata t nil))
+               (run-cancelled-client-stream-call conn service method request-messages metadata t nil encoding))
               (:after-close-send-ms
                (run-cancelled-client-stream-call conn service method request-messages metadata
-                                                 nil (slot-value cancel 'conformance-proto::after-close-send-ms)))
+                                                 nil (slot-value cancel 'conformance-proto::after-close-send-ms) encoding))
               (otherwise
                ;; Default: immediate cancel after close-send
-               (run-cancelled-client-stream-call conn service method request-messages metadata nil 0))))
-          (run-client-stream-call conn service method request-messages codec metadata timeout-ms))
+               (run-cancelled-client-stream-call conn service method request-messages metadata nil 0 encoding))))
+          (run-client-stream-call conn service method request-messages codec metadata timeout-ms encoding))
     ;; Build the response
     (let ((result (make-instance 'client-response-result
                     :response-headers (convert-headers headers)
@@ -899,7 +988,7 @@ Handles edge cases where headers might be malformed."
           (setf (slot-value result 'conformance-proto::proto-error) err)))
       (make-success-response test-name result))))
 
-(defun execute-bidi-stream-request (conn service method request-messages codec metadata timeout-ms cancel test-name)
+(defun execute-bidi-stream-request (conn service method request-messages codec metadata timeout-ms cancel test-name &optional encoding)
   "Execute a bidirectional streaming RPC request."
   (multiple-value-bind (responses headers trailers status-code status-msg)
       ;; Check if this is a cancellation test
@@ -907,18 +996,18 @@ Handles edge cases where headers might be malformed."
           (let ((timing-case (slot-value cancel 'conformance-proto::cancel-timing-case)))
             (case timing-case
               (:before-close-send
-               (run-cancelled-bidi-stream-call conn service method request-messages metadata t nil nil))
+               (run-cancelled-bidi-stream-call conn service method request-messages metadata t nil nil encoding))
               (:after-close-send-ms
                (run-cancelled-bidi-stream-call conn service method request-messages metadata
-                                               nil (slot-value cancel 'conformance-proto::after-close-send-ms) nil))
+                                               nil (slot-value cancel 'conformance-proto::after-close-send-ms) nil encoding))
               (:after-num-responses
                (run-cancelled-bidi-stream-call conn service method request-messages metadata
-                                               nil nil (slot-value cancel 'conformance-proto::after-num-responses)))
+                                               nil nil (slot-value cancel 'conformance-proto::after-num-responses) encoding))
               (otherwise
                ;; Default: immediate cancel after close-send
-               (run-cancelled-bidi-stream-call conn service method request-messages metadata nil 0 nil))))
+               (run-cancelled-bidi-stream-call conn service method request-messages metadata nil 0 nil encoding))))
           ;; Use half-duplex mode (send all, then receive all)
-          (run-bidi-stream-call conn service method request-messages codec metadata timeout-ms nil))
+          (run-bidi-stream-call conn service method request-messages codec metadata timeout-ms nil encoding))
     ;; Build the response
     (let ((result (make-instance 'client-response-result
                     :response-headers (convert-headers headers)

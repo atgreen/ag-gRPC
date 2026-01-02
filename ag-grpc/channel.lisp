@@ -115,13 +115,24 @@ Convenience function equivalent to (make-channel ... :tls t)."
   "Return T if the channel is using TLS encryption"
   (channel-tls channel))
 
-(defun channel-send-message (channel stream-id message &key end-stream)
-  "Send a message on a stream"
-  (let ((frame (encode-grpc-message message)))
-    (ag-http2:connection-send-data (channel-connection channel)
-                                   stream-id
-                                   frame
-                                   :end-stream end-stream)))
+(defun channel-send-message (channel stream-id message &key end-stream encoding)
+  "Send a message on a stream.
+ENCODING is the compression algorithm to use (e.g., \"gzip\"). If nil, no compression."
+  (let* ((data (if (typep message 'vector)
+                   message
+                   (ag-proto:serialize-to-bytes message)))
+         (compressed-p nil))
+    ;; Compress if encoding is specified and message is non-empty
+    ;; (empty messages don't benefit from compression and may confuse some servers)
+    (when (and encoding (not (string-equal encoding "identity")) (plusp (length data)))
+      (multiple-value-setq (data compressed-p)
+        (compress-grpc-message data encoding)))
+    ;; Frame and send
+    (let ((frame (encode-grpc-message data :compressed compressed-p)))
+      (ag-http2:connection-send-data (channel-connection channel)
+                                     stream-id
+                                     frame
+                                     :end-stream end-stream))))
 
 (defun channel-receive-headers (channel stream-id)
   "Receive response headers from a stream"
@@ -134,9 +145,10 @@ Convenience function equivalent to (make-channel ... :tls t)."
           do (ag-http2:connection-read-frame conn))
     (ag-http2:stream-headers stream)))
 
-(defun channel-receive-message (channel stream-id)
+(defun channel-receive-message (channel stream-id &optional encoding)
   "Receive a message from a stream.
-Handles messages that span multiple HTTP/2 DATA frames."
+Handles messages that span multiple HTTP/2 DATA frames.
+ENCODING is the compression algorithm from grpc-encoding header (e.g., \"gzip\")."
   (let* ((conn (channel-connection channel))
          (stream (ag-http2:multiplexer-get-stream
                   (ag-http2:connection-multiplexer conn)
@@ -145,11 +157,11 @@ Handles messages that span multiple HTTP/2 DATA frames."
     (loop
       ;; Try to decode from current buffer (non-destructively peek first)
       (let* ((buffer (ag-http2:stream-data-buffer stream))
-             (result (decode-grpc-message buffer 0)))
+             (result (decode-grpc-message buffer 0 encoding)))
         (when result
           ;; Got a complete message - consume exactly what we decoded
           (multiple-value-bind (data compressed consumed)
-              (decode-grpc-message buffer 0)
+              (decode-grpc-message buffer 0 encoding)
             (declare (ignore compressed))
             ;; Remove consumed bytes from buffer
             (let ((remaining (subseq buffer consumed)))

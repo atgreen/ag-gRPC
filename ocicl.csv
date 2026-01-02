@@ -12,6 +12,7 @@ cffi-libffi, ghcr.io/ocicl/cffi-grovel@sha256:0854274d437e36f8bd30549103de36d23a
 cffi-tests, ghcr.io/ocicl/cffi-grovel@sha256:0854274d437e36f8bd30549103de36d23ac22f481f2746e61785e883f52b25fa, cffi-20250822-dad3520/cffi-tests.asd
 cffi-toolchain, ghcr.io/ocicl/cffi-grovel@sha256:0854274d437e36f8bd30549103de36d23ac22f481f2746e61785e883f52b25fa, cffi-20250822-dad3520/cffi-toolchain.asd
 cffi-uffi-compat, ghcr.io/ocicl/cffi-grovel@sha256:0854274d437e36f8bd30549103de36d23ac22f481f2746e61785e883f52b25fa, cffi-20250822-dad3520/cffi-uffi-compat.asd
+chipz, ghcr.io/ocicl/chipz@sha256:fae0fae0c93199ba57c92d9102245a55c8a2c12af4442e0b141d5670bef4f2f0, chipz-20240503-6f80368/chipz.asd
 cl-ppcre, ghcr.io/ocicl/cl-ppcre@sha256:bf073924cf4fd5957a4fd961a95d446ed0e53fa32a5002cbd2d52182874f45e5, cl-ppcre-20250606-a2ea581/cl-ppcre.asd
 cl-ppcre-unicode, ghcr.io/ocicl/cl-ppcre@sha256:bf073924cf4fd5957a4fd961a95d446ed0e53fa32a5002cbd2d52182874f45e5, cl-ppcre-20250606-a2ea581/cl-ppcre-unicode.asd
 cl-reexport, ghcr.io/ocicl/cl-reexport@sha256:c795feb3e3727a19e61797187eb31bac1e855b1332335d26752200a28e9b9da8, cl-reexport-20240503-03ad7a0/cl-reexport.asd
@@ -50,6 +51,7 @@ mt19937, ghcr.io/ocicl/mt19937@sha256:49c0a25a535cd22212343c67e17635b8e05675ad9c
 named-readtables, ghcr.io/ocicl/named-readtables@sha256:c3b4f9e8c99154d63c9adb94144af2c366f2560a7be3d12f7dfed728ff769c91, named-readtables-20251210-6eea566/named-readtables.asd
 named-readtables-test, ghcr.io/ocicl/named-readtables@sha256:c3b4f9e8c99154d63c9adb94144af2c366f2560a7be3d12f7dfed728ff769c91, named-readtables-20251210-6eea566/named-readtables-test.asd
 net.didierverna.asdf-flv, ghcr.io/ocicl/net.didierverna.asdf-flv@sha256:e5cd087d41cf24302a92d9bac426a925f8868b554be2414c0f012c961e3ddb8c, asdf-flv-20240503-3f1de41/net.didierverna.asdf-flv.asd
+salza2, ghcr.io/ocicl/salza2@sha256:0f9d930524b469e1442372a6e12b26742d9e6a1144e6a455006943190d1ea71e, salza2-2.1/salza2.asd
 split-sequence, ghcr.io/ocicl/split-sequence@sha256:3a37662eedd99c42995587b9d443c4631f25c4c523091bcca31a27b880585b8e, split-sequence-2.0.1/split-sequence.asd
 swap-bytes, ghcr.io/ocicl/swap-bytes@sha256:06edc17deb0f27cdf6290689711ece670a8282dfd07b732a9adc541af1ce7ed6, swap-bytes-20240503-43ab141/swap-bytes.asd
 trivial-backtrace, ghcr.io/ocicl/trivial-backtrace@sha256:89a3138695bb767c50001402fad60dacfc1e867e4e3d3579cc6f636d3e29a51c, trivial-backtrace-20240503-7f90b4a/trivial-backtrace.asd

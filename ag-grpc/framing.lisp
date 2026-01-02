@@ -58,10 +58,10 @@ Returns a byte vector with the gRPC frame header prepended."
 ;;;; Decoding
 ;;;; ========================================================================
 
-(defun decode-grpc-message (bytes &optional (start 0))
+(defun decode-grpc-message (bytes &optional (start 0) encoding)
   "Decode a gRPC message frame from bytes.
 Returns (values message-data compressed-p bytes-consumed) or NIL if incomplete.
-Note: Compressed messages are not currently supported and will signal an error."
+ENCODING is the compression algorithm (e.g., \"gzip\") for decompression."
   (let ((available (- (length bytes) start)))
     (when (< available +grpc-frame-header-size+)
       (return-from decode-grpc-message nil))
@@ -73,19 +73,21 @@ Note: Compressed messages are not currently supported and will signal an error."
            (total-size (+ +grpc-frame-header-size+ length)))
       (when (< available total-size)
         (return-from decode-grpc-message nil))
-      ;; Error on compressed messages since we don't support decompression
-      (when compressed-p
-        (error 'grpc-error
-               :message "Received compressed message but compression is not supported. Ensure peer uses grpc-encoding: identity"))
       (let ((data (subseq bytes
                           (+ start +grpc-frame-header-size+)
                           (+ start total-size))))
-        (values data compressed-p total-size)))))
+        ;; Decompress if needed
+        (when compressed-p
+          (setf data (decompress-grpc-message data (or encoding "gzip"))))
+        ;; ALWAYS create a fresh simple array to ensure type compatibility
+        (let ((simple (make-array (length data) :element-type '(unsigned-byte 8))))
+          (replace simple data)
+          (values simple compressed-p total-size))))))
 
-(defun decode-grpc-message-from-stream (stream)
+(defun decode-grpc-message-from-stream (stream &optional encoding)
   "Read and decode a gRPC message from a stream.
 Returns (values message-data compressed-p) or NIL on EOF.
-Note: Compressed messages are not currently supported and will signal an error."
+ENCODING is the compression algorithm (e.g., \"gzip\") for decompression."
   (let ((header (make-array +grpc-frame-header-size+
                             :element-type '(unsigned-byte 8))))
     (when (< (read-sequence header stream) +grpc-frame-header-size+)
@@ -96,13 +98,15 @@ Note: Compressed messages are not currently supported and will signal an error."
                            (ash (aref header 3) 8)
                            (aref header 4)))
            (data (make-array length :element-type '(unsigned-byte 8))))
-      ;; Error on compressed messages since we don't support decompression
-      (when compressed-p
-        (error 'grpc-error
-               :message "Received compressed message but compression is not supported. Ensure peer uses grpc-encoding: identity"))
       (when (< (read-sequence data stream) length)
         (error 'grpc-error :message "Incomplete gRPC message"))
-      (values data compressed-p))))
+      ;; Decompress if needed
+      (when compressed-p
+        (setf data (decompress-grpc-message data (or encoding "gzip"))))
+      ;; ALWAYS create a fresh simple array to ensure type compatibility
+      (let ((simple (make-array (length data) :element-type '(unsigned-byte 8))))
+        (replace simple data)
+        (values simple compressed-p)))))
 
 ;;;; ========================================================================
 ;;;; Multi-Message Handling
@@ -127,7 +131,42 @@ Returns a list of message data byte vectors."
 ;;;; ========================================================================
 
 ;;; gRPC supports multiple compression algorithms, specified via the
-;;; "grpc-encoding" header. For now, we only support uncompressed messages.
+;;; "grpc-encoding" header. We support gzip via chipz (decompression)
+;;; and salza2 (compression).
+
+(defun gzip-compress (data)
+  "Compress DATA using gzip. Returns compressed byte vector."
+  ;; Ensure input is a simple array for salza2
+  (let* ((simple-data (if (typep data '(simple-array (unsigned-byte 8) (*)))
+                          data
+                          (let ((simple (make-array (length data) :element-type '(unsigned-byte 8))))
+                            (replace simple data)
+                            simple)))
+         (output (make-array (length data)
+                             :element-type '(unsigned-byte 8)
+                             :adjustable t
+                             :fill-pointer 0)))
+    (salza2:with-compressor (compressor 'salza2:gzip-compressor
+                              :callback (lambda (buffer end)
+                                          (loop for i from 0 below end
+                                                do (vector-push-extend (aref buffer i) output))))
+      (salza2:compress-octet-vector simple-data compressor))
+    ;; Return as simple array
+    (coerce output '(simple-array (unsigned-byte 8) (*)))))
+
+(defun gzip-decompress (data)
+  "Decompress gzip DATA. Returns decompressed byte vector."
+  ;; Ensure input is a simple array for chipz
+  (let* ((simple-data (if (typep data '(simple-array (unsigned-byte 8) (*)))
+                          data
+                          (let ((simple (make-array (length data) :element-type '(unsigned-byte 8))))
+                            (replace simple data)
+                            simple)))
+         (result (chipz:decompress nil 'chipz:gzip simple-data)))
+    ;; Return as simple array
+    (if (typep result '(simple-array (unsigned-byte 8) (*)))
+        result
+        (coerce result '(simple-array (unsigned-byte 8) (*))))))
 
 (defun decompress-grpc-message (data encoding)
   "Decompress a gRPC message body.
@@ -136,27 +175,38 @@ ENCODING is the compression algorithm name (e.g., \"gzip\", \"deflate\")."
     ((or (null encoding) (string= encoding "identity"))
      data)
     ((string= encoding "gzip")
-     ;; TODO: Implement gzip decompression
-     (error 'grpc-error :message "gzip compression not yet implemented"))
+     (gzip-decompress data))
     ((string= encoding "deflate")
-     ;; TODO: Implement deflate decompression
-     (error 'grpc-error :message "deflate compression not yet implemented"))
+     (let ((result (chipz:decompress nil 'chipz:deflate data)))
+       (if (typep result '(simple-array (unsigned-byte 8) (*)))
+           result
+           (coerce result '(simple-array (unsigned-byte 8) (*))))))
     (t
      (error 'grpc-error
             :message (format nil "Unknown compression: ~A" encoding)))))
 
 (defun compress-grpc-message (data encoding)
   "Compress a gRPC message body.
-ENCODING is the compression algorithm name."
+ENCODING is the compression algorithm name.
+Returns (values compressed-data compressed-p)."
   (cond
     ((or (null encoding) (string= encoding "identity"))
      (values data nil))
     ((string= encoding "gzip")
-     ;; TODO: Implement gzip compression
-     (error 'grpc-error :message "gzip compression not yet implemented"))
+     (values (gzip-compress data) t))
     ((string= encoding "deflate")
-     ;; TODO: Implement deflate compression
-     (error 'grpc-error :message "deflate compression not yet implemented"))
+     ;; salza2 supports deflate via zlib-compressor
+     (let ((output (make-array (length data)
+                               :element-type '(unsigned-byte 8)
+                               :adjustable t
+                               :fill-pointer 0)))
+       (salza2:with-compressor (compressor 'salza2:deflate-compressor
+                                 :callback (lambda (buffer end)
+                                             (loop for i from 0 below end
+                                                   do (vector-push-extend (aref buffer i) output))))
+         (salza2:compress-octet-vector data compressor))
+       ;; Return as simple array
+       (values (coerce output '(simple-array (unsigned-byte 8) (*))) t)))
     (t
      (error 'grpc-error
             :message (format nil "Unknown compression: ~A" encoding)))))
