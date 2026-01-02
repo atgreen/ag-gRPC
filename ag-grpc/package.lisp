@@ -53,6 +53,7 @@
    #:make-secure-channel
    #:channel-close
    #:channel-tls-p
+   #:channel-cancel-stream
 
    ;; Call (unary)
    #:grpc-call

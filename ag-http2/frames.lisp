@@ -42,6 +42,22 @@
     (,+settings-max-frame-size+ . 16384)
     (,+settings-max-header-list-size+ . 8192)))
 
+;;; Error codes (RFC 7540 Section 7)
+(defconstant +error-no-error+ #x0)
+(defconstant +error-protocol-error+ #x1)
+(defconstant +error-internal-error+ #x2)
+(defconstant +error-flow-control-error+ #x3)
+(defconstant +error-settings-timeout+ #x4)
+(defconstant +error-stream-closed+ #x5)
+(defconstant +error-frame-size-error+ #x6)
+(defconstant +error-refused-stream+ #x7)
+(defconstant +error-cancel+ #x8)
+(defconstant +error-compression-error+ #x9)
+(defconstant +error-connect-error+ #xa)
+(defconstant +error-enhance-your-calm+ #xb)
+(defconstant +error-inadequate-security+ #xc)
+(defconstant +error-http-1-1-required+ #xd)
+
 ;;;; ========================================================================
 ;;;; Frame Base Class
 ;;;; ========================================================================
@@ -339,3 +355,17 @@ Strips padding (if PADDED flag set) and priority data (if PRIORITY flag set)."
                    :last-stream-id last-stream-id
                    :error-code error-code
                    :debug-data debug-bytes)))
+
+(defun make-rst-stream-frame (stream-id error-code)
+  "Create a RST_STREAM frame to immediately terminate a stream.
+ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation)."
+  (let ((payload (make-array 4 :element-type '(unsigned-byte 8))))
+    ;; RST_STREAM payload is just the 32-bit error code
+    (setf (aref payload 0) (logand (ash error-code -24) #xff)
+          (aref payload 1) (logand (ash error-code -16) #xff)
+          (aref payload 2) (logand (ash error-code -8) #xff)
+          (aref payload 3) (logand error-code #xff))
+    (make-instance 'rst-stream-frame
+                   :stream-id stream-id
+                   :payload payload
+                   :error-code error-code)))

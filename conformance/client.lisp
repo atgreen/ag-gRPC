@@ -230,6 +230,35 @@ Also adds the x-test-case-name header."
           (ag-grpc:metadata-add metadata name v))))
     metadata))
 
+(defun run-cancelled-unary-call (conn service method request-messages metadata cancel-after-ms)
+  "Execute a unary gRPC call and then cancel it.
+CANCEL-AFTER-MS - Delay before cancellation (0 = immediate).
+Returns a cancelled status result."
+  ;; Get the actual request
+  (let* ((any-msg (first request-messages))
+         (request-data (slot-value any-msg 'conformance-proto::value))
+         (request (ag-proto:deserialize-from-bytes 'unary-request request-data))
+         (method-path (format nil "/~A/~A" service method)))
+    (log-msg "Cancelled call to ~A, cancel-after-ms=~A" method-path cancel-after-ms)
+    ;; Low-level call: open stream, send request, then cancel
+    (let* ((stream (ag-grpc::channel-new-stream conn))
+           (stream-id (ag-http2:stream-id stream)))
+      ;; Send headers (no timeout since we're cancelling)
+      (ag-grpc::channel-send-headers conn stream-id method-path
+                                      :metadata metadata
+                                      :timeout nil)
+      ;; Send request with END_STREAM
+      (let ((request-bytes (ag-proto:serialize-to-bytes request)))
+        (ag-grpc::channel-send-message conn stream-id request-bytes :end-stream t))
+      ;; Wait if needed
+      (when (and cancel-after-ms (plusp cancel-after-ms))
+        (sleep (/ cancel-after-ms 1000.0)))
+      ;; Cancel the stream with RST_STREAM
+      (ag-grpc:channel-cancel-stream conn stream-id)
+      (log-msg "Stream ~A cancelled" stream-id)
+      ;; Return cancelled status
+      (values nil nil nil ag-grpc:+grpc-status-cancelled+ "Canceled"))))
+
 (defun run-unary-call (conn service method request-messages codec metadata timeout-ms)
   "Execute a unary gRPC call and return the response.
 TIMEOUT-MS - Timeout in milliseconds (0 means no timeout)."
@@ -353,11 +382,24 @@ Handles edge cases where headers might be malformed."
                  (request-headers (slot-value request 'conformance-proto::request-headers))
                  (codec (slot-value request 'conformance-proto::codec))
                  (timeout-ms (slot-value request 'conformance-proto::timeout-ms))
+                 (cancel (slot-value request 'conformance-proto::cancel))
                  (metadata (convert-request-headers request-headers test-name))
                  (conn (make-grpc-connection request)))
             (unwind-protect
                 (multiple-value-bind (response headers trailers status-code status-msg)
-                    (run-unary-call conn service method request-messages codec metadata timeout-ms)
+                    ;; Check if this is a cancellation test
+                    (if cancel
+                        ;; Get cancel timing - after_close_send_ms is most common for unary
+                        (let ((cancel-after-ms
+                                (let ((timing-case (slot-value cancel 'conformance-proto::cancel-timing-case)))
+                                  (case timing-case
+                                    (:after-close-send-ms
+                                     (slot-value cancel 'conformance-proto::after-close-send-ms))
+                                    ;; For any other timing or no timing, cancel immediately
+                                    (otherwise 0)))))
+                          (run-cancelled-unary-call conn service method request-messages metadata cancel-after-ms))
+                        ;; Normal call
+                        (run-unary-call conn service method request-messages codec metadata timeout-ms))
                   ;; Build the response - always use ClientResponseResult
                   ;; ClientErrorResult is only for client-side failures, not gRPC errors
                   (let ((result (make-instance 'client-response-result

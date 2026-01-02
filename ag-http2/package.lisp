@@ -46,6 +46,25 @@
    #:+flag-end-headers+
    #:+flag-ack+
 
+   ;; Error codes
+   #:+error-no-error+
+   #:+error-protocol-error+
+   #:+error-internal-error+
+   #:+error-flow-control-error+
+   #:+error-settings-timeout+
+   #:+error-stream-closed+
+   #:+error-frame-size-error+
+   #:+error-refused-stream+
+   #:+error-cancel+
+   #:+error-compression-error+
+   #:+error-connect-error+
+   #:+error-enhance-your-calm+
+   #:+error-inadequate-security+
+   #:+error-http-1-1-required+
+
+   ;; Frame creation
+   #:make-rst-stream-frame
+
    ;; Stream states
    #:http2-stream
    #:stream-state
@@ -57,6 +76,7 @@
    #:make-server-connection
    #:connection-send-headers
    #:connection-send-data
+   #:connection-send-rst-stream
    #:connection-read-frame
    #:connection-close
 

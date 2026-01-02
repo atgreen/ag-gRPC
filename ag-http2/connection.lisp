@@ -227,6 +227,15 @@ Respects MAX_FRAME_SIZE and flow control windows, fragmenting if needed."
         (force-output (connection-stream conn))
         (stream-transition h2-stream :send-end-stream)))))
 
+(defun connection-send-rst-stream (conn stream-id error-code)
+  "Send a RST_STREAM frame to immediately terminate a stream.
+ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation)."
+  (let ((frame (make-rst-stream-frame stream-id error-code)))
+    (write-frame frame (connection-stream conn))
+    (force-output (connection-stream conn))
+    ;; Close the stream locally
+    (multiplexer-close-stream (connection-multiplexer conn) stream-id)))
+
 ;;;; ========================================================================
 ;;;; Receiving Frames
 ;;;; ========================================================================

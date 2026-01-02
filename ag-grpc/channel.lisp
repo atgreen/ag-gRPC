@@ -183,3 +183,11 @@ For unary calls, this indicates multiple messages were sent which is an error."
                   (ag-http2:connection-multiplexer conn)
                   stream-id)))
     (plusp (length (ag-http2:stream-data-buffer stream)))))
+
+(defun channel-cancel-stream (channel stream-id)
+  "Cancel an in-progress RPC call by sending RST_STREAM with CANCEL error code.
+This immediately terminates the stream without waiting for a response."
+  (ag-http2:connection-send-rst-stream
+   (channel-connection channel)
+   stream-id
+   ag-http2:+error-cancel+))
