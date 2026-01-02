@@ -686,13 +686,20 @@ When the stream ends, also sets stream-status."
                 (if (bidi-stream-response-type bidi-stream)
                     (ag-proto:deserialize-from-bytes (bidi-stream-response-type bidi-stream) data)
                     data))))
+          ;; Extract error message from trailers
+          (let ((message-trailer (assoc "grpc-message" trailers :test #'string-equal)))
+            (when message-trailer
+              (setf (call-status-message call)
+                    (percent-decode (cdr message-trailer)))))
           ;; Mark stream as finished
           (setf (bidi-stream-recv-finished-p bidi-stream) t)
           ;; Signal error if not OK
           (unless (grpc-status-ok-p (stream-status bidi-stream))
             (error 'grpc-status-error
                    :code (stream-status bidi-stream)
-                   :message (call-status-message call)))
+                   :message (call-status-message call)
+                   :headers (call-response-headers call)
+                   :trailers (call-response-trailers call)))
           (return-from stream-read-message nil)))
       ;; Read a frame
       (ag-http2:connection-read-frame conn)

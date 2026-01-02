@@ -87,7 +87,9 @@
    ;; Bidirectional streaming
    #:grpc-bidi-stream
    #:call-bidirectional-streaming
+   #:stream-read-message
    #:stream-close-send
+   #:stream-status
    #:bidi-stream-send-closed-p
    #:bidi-stream-recv-finished-p
    #:do-bidi-recv

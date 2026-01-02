@@ -21,7 +21,8 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 | Unary RPC | 82 | ✅ Pass |
 | Client Streaming | 23 | ✅ Pass |
 | Server Streaming | 59 | ✅ Pass |
-| **Total** | **164** | **100%** |
+| Bidi Streaming (half-duplex) | 25 | ✅ Pass |
+| **Total** | **189** | **100%** |
 
 ### Feature Support Matrix
 
@@ -600,6 +601,7 @@ make interop
 - [trivial-utf-8](https://gitlab.common-lisp.net/trivial-utf-8/trivial-utf-8) - UTF-8 encoding
 - [ieee-floats](https://github.com/marijnh/ieee-floats) - IEEE 754 float encoding
 - [trivial-gray-streams](https://github.com/trivial-gray-streams/trivial-gray-streams) - Gray stream support
+- [bordeaux-threads](https://github.com/sionescu/bordeaux-threads) - Portable threading (for timeouts)
 - [iparse](https://github.com/atgreen/iparse) - Parser combinator library
 - [clingon](https://github.com/dnaeon/clingon) - CLI framework (for ag-protoc)
 - [version-string](https://github.com/atgreen/cl-version-string) - Version string generation

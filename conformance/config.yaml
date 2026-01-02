@@ -11,6 +11,7 @@ features:
     - STREAM_TYPE_UNARY
     - STREAM_TYPE_CLIENT_STREAM
     - STREAM_TYPE_SERVER_STREAM
+    - STREAM_TYPE_HALF_DUPLEX_BIDI_STREAM
   supports_h2c: true
   supports_tls: false
   supports_trailers: true
