@@ -482,6 +482,15 @@ Returns (values response status) where response is the deserialized message."
     ;; Receive trailers (contains gRPC status)
     (let ((raw-trailers (channel-receive-trailers channel stream-id)))
       (setf (call-response-trailers call) raw-trailers))
+    ;; Check for extra data in buffer (multiple responses = protocol error)
+    (when (channel-stream-has-extra-data-p channel stream-id)
+      (setf (call-status call) +grpc-status-unimplemented+)
+      (setf (call-status-message call) "Multiple responses received in client streaming call")
+      (error 'grpc-status-error
+             :code (call-status call)
+             :message (call-status-message call)
+             :headers (call-response-headers call)
+             :trailers (call-response-trailers call)))
     ;; Extract status from trailers
     (let ((status-trailer (assoc "grpc-status" (call-response-trailers call)
                                  :test #'string-equal)))
@@ -498,7 +507,19 @@ Returns (values response status) where response is the deserialized message."
     (unless (grpc-status-ok-p (call-status call))
       (error 'grpc-status-error
              :code (call-status call)
-             :message (call-status-message call)))
+             :message (call-status-message call)
+             :headers (call-response-headers call)
+             :trailers (call-response-trailers call)))
+    ;; For client streaming, OK status but no response is a protocol error
+    (when (and (grpc-status-ok-p (call-status call))
+               (null (call-response call)))
+      (setf (call-status call) +grpc-status-unimplemented+)
+      (setf (call-status-message call) "OK status but no response message")
+      (error 'grpc-status-error
+             :code (call-status call)
+             :message (call-status-message call)
+             :headers (call-response-headers call)
+             :trailers (call-response-trailers call)))
     (values (call-response call) (call-status call))))
 
 (defmacro with-client-stream ((var channel method &key metadata timeout response-type) &body body)
