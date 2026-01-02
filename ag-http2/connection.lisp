@@ -81,12 +81,18 @@
     (connection-handshake conn)
     conn))
 
-(defun make-server-connection (socket)
-  "Create a new HTTP/2 server connection from an accepted socket"
-  (let* ((stream (usocket:socket-stream socket))
+(defun make-server-connection (socket &key tls certificate key password)
+  "Create a new HTTP/2 server connection from an accepted socket.
+If TLS is true, wrap the stream with TLS using the provided certificate and key."
+  (let* ((raw-stream (usocket:socket-stream socket))
+         (stream (if tls
+                     (wrap-server-stream-with-tls raw-stream certificate key
+                                                   :password password)
+                     raw-stream))
          (conn (make-instance 'http2-connection
                               :socket socket
                               :stream stream
+                              :tls-p tls
                               :client-p nil)))
     (setf (connection-multiplexer conn) (make-stream-multiplexer :client-p nil))
     conn))

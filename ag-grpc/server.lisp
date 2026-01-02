@@ -230,7 +230,10 @@ If GRACEFUL is true, wait for active connections to finish."
 
 (defun server-handle-connection (server client-socket)
   "Handle a single client connection"
-  (let* ((conn (ag-http2:make-server-connection client-socket))
+  (let* ((conn (ag-http2:make-server-connection client-socket
+                                                 :tls (server-tls server)
+                                                 :certificate (server-tls-certificate server)
+                                                 :key (server-tls-key server)))
          (peer-addr (format nil "~A:~A"
                             (usocket:get-peer-address client-socket)
                             (usocket:get-peer-port client-socket))))

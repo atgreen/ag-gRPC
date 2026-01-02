@@ -44,7 +44,7 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 | Metadata | ✅ | ✅ |
 | Deadlines/Timeouts | ✅ | ✅ |
 | Cancellation | ✅ | — |
-| TLS (h2) | ✅ | — |
+| TLS (h2) | ✅ | ✅ |
 | Plaintext (h2c) | ✅ | ✅ |
 | Compression (gzip) | ✅ | ✅ |
 
@@ -494,7 +494,7 @@ ag-gRPC includes full server-side support for hosting gRPC services:
 
 ag-gRPC supports optional TLS encryption via [cl+ssl](https://github.com/cl-plus-ssl/cl-plus-ssl).
 
-### Using TLS
+### Client TLS
 
 ```lisp
 ;; Create a secure channel
@@ -507,6 +507,25 @@ ag-gRPC supports optional TLS encryption via [cl+ssl](https://github.com/cl-plus
 (defvar *channel* (ag-grpc:make-channel "api.example.com" 443
                                          :tls t
                                          :tls-verify t))
+```
+
+### Server TLS
+
+```lisp
+;; Create a TLS-enabled server with certificate and key
+(defvar *server* (ag-grpc:make-grpc-server 50051
+                   :tls t
+                   :tls-certificate "/path/to/cert.pem"
+                   :tls-key "/path/to/key.pem"))
+
+;; Register handlers and start as usual
+(ag-grpc:server-start *server*)
+```
+
+Generate a self-signed certificate for testing:
+
+```bash
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
 ```
 
 ### TLS Requirements
@@ -634,7 +653,6 @@ Current limitations (contributions welcome!):
 
 - No load balancing or service discovery
 - No deadline propagation
-- Server TLS not yet implemented
 
 ## License
 
