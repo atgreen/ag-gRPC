@@ -121,7 +121,11 @@ SERVER-STREAMING - T if server sends multiple messages"
    (response-metadata :initform nil :accessor context-response-metadata
                       :documentation "Response metadata to send")
    (trailing-metadata :initform nil :accessor context-trailing-metadata
-                      :documentation "Trailing metadata to send"))
+                      :documentation "Trailing metadata to send")
+   (request-encoding :initform nil :accessor context-request-encoding
+                     :documentation "Compression encoding used by client (from grpc-encoding header)")
+   (response-encoding :initform nil :accessor context-response-encoding
+                      :documentation "Compression encoding to use for responses (negotiated from grpc-accept-encoding)"))
   (:documentation "Context for an RPC call, passed to handlers"))
 
 (defun context-metadata (ctx &optional key)
@@ -298,6 +302,16 @@ If GRACEFUL is true, wait for active connections to finish."
         (when timeout-header
           (setf (context-deadline ctx)
                 (+ (get-universal-time) (parse-grpc-timeout timeout-header)))))
+      ;; Extract compression encoding from client request
+      (let ((request-encoding (cdr (assoc "grpc-encoding" headers :test #'string-equal))))
+        (when (and request-encoding (not (string-equal request-encoding "identity")))
+          (setf (context-request-encoding ctx) request-encoding)))
+      ;; Negotiate response compression based on client's accept-encoding
+      (let ((accept-encoding (cdr (assoc "grpc-accept-encoding" headers :test #'string-equal))))
+        (when accept-encoding
+          ;; Check if client accepts gzip
+          (when (search "gzip" accept-encoding :test #'char-equal)
+            (setf (context-response-encoding ctx) "gzip"))))
       ;; Store context for DATA frame handling
       (setf (stream-call-context h2-stream) ctx)
       (setf (stream-handler h2-stream) handler)
@@ -357,9 +371,10 @@ If GRACEFUL is true, wait for active connections to finish."
   "Handle a unary RPC call"
   (handler-case
       (let* ((request-type (handler-request-type handler))
+             (request-encoding (context-request-encoding ctx))
              (request (when (and request-data (> (length request-data) 0))
                         (multiple-value-bind (msg-data compressed consumed)
-                            (decode-grpc-message request-data 0)
+                            (decode-grpc-message request-data 0 request-encoding)
                           (declare (ignore compressed consumed))
                           (when msg-data
                             (ag-proto:deserialize-from-bytes request-type msg-data)))))
@@ -385,9 +400,10 @@ If GRACEFUL is true, wait for active connections to finish."
   (handler-case
       (let* ((request-type (handler-request-type handler))
              (response-type (handler-response-type handler))
+             (request-encoding (context-request-encoding ctx))
              (request (when (and request-data (> (length request-data) 0))
                         (multiple-value-bind (msg-data compressed consumed)
-                            (decode-grpc-message request-data 0)
+                            (decode-grpc-message request-data 0 request-encoding)
                           (declare (ignore compressed consumed))
                           (when msg-data
                             (ag-proto:deserialize-from-bytes request-type msg-data)))))
@@ -486,8 +502,11 @@ If GRACEFUL is true, wait for active connections to finish."
     (error "Cannot send on closed stream"))
   (let* ((conn (server-stream-connection stream))
          (stream-id (server-stream-id stream))
+         (response-encoding (context-response-encoding (server-stream-context stream)))
          (message-bytes (ag-proto:serialize-to-bytes message))
-         (frame-data (encode-grpc-message message-bytes)))
+         (frame-data (if (and response-encoding (string-equal response-encoding "gzip"))
+                         (encode-grpc-message (compress-grpc-message message-bytes response-encoding) :compressed t)
+                         (encode-grpc-message message-bytes))))
     (ag-http2:connection-send-data conn stream-id frame-data :end-stream nil))
   stream)
 
@@ -501,10 +520,11 @@ Returns the deserialized message, or NIL if no more messages."
          (h2-stream (ag-http2:multiplexer-get-stream
                      (ag-http2:connection-multiplexer conn)
                      stream-id))
-         (buffer (server-stream-recv-buffer stream)))
+         (buffer (server-stream-recv-buffer stream))
+         (request-encoding (context-request-encoding (server-stream-context stream))))
     ;; Try to decode from buffer first
     (multiple-value-bind (data compressed consumed)
-        (decode-grpc-message buffer 0)
+        (decode-grpc-message buffer 0 request-encoding)
       (declare (ignore compressed))
       (when data
         ;; Got a message, remove consumed bytes from buffer
@@ -527,7 +547,7 @@ Returns the deserialized message, or NIL if no more messages."
               do (vector-push-extend byte buffer)))
       ;; Try to decode
       (multiple-value-bind (data compressed consumed)
-          (decode-grpc-message buffer 0)
+          (decode-grpc-message buffer 0 request-encoding)
         (declare (ignore compressed))
         (when data
           (let ((remaining (subseq buffer consumed)))
@@ -557,7 +577,8 @@ Returns RESULT (default NIL) when no more messages."
   "Send response headers"
   (unless (context-response-headers-sent-p ctx)
     (let ((headers (make-response-headers
-                    :metadata (context-response-metadata ctx))))
+                    :metadata (context-response-metadata ctx)
+                    :encoding (context-response-encoding ctx))))
       (ag-http2:connection-send-headers conn (context-stream-id ctx)
                                         headers :end-stream nil)
       (setf (context-response-headers-sent-p ctx) t))))
@@ -568,8 +589,11 @@ Returns RESULT (default NIL) when no more messages."
   (server-send-headers conn ctx)
   ;; Send response data
   (when response
-    (let* ((response-bytes (ag-proto:serialize-to-bytes response))
-           (frame-data (encode-grpc-message response-bytes)))
+    (let* ((response-encoding (context-response-encoding ctx))
+           (response-bytes (ag-proto:serialize-to-bytes response))
+           (frame-data (if (and response-encoding (string-equal response-encoding "gzip"))
+                           (encode-grpc-message (compress-grpc-message response-bytes response-encoding) :compressed t)
+                           (encode-grpc-message response-bytes))))
       (ag-http2:connection-send-data conn (context-stream-id ctx)
                                      frame-data :end-stream nil)))
   ;; Send trailers

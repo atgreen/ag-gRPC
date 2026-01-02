@@ -246,10 +246,14 @@ Skips pseudo-headers and standard gRPC headers."
                 (setf headers (append headers (list entry))))))))
     headers))
 
-(defun make-response-headers (&key metadata)
-  "Create standard gRPC response headers"
+(defun make-response-headers (&key metadata encoding)
+  "Create standard gRPC response headers.
+ENCODING - Optional compression encoding to advertise (e.g., \"gzip\")."
   (let ((headers (list (cons :status "200")
                        (cons "content-type" *grpc-content-type*))))
+    ;; Add grpc-encoding header if using compression
+    (when (and encoding (not (string-equal encoding "identity")))
+      (push (cons "grpc-encoding" encoding) headers))
     (when metadata
       (dolist (entry (metadata-entries metadata))
         (let ((key (car entry))
