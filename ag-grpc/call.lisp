@@ -50,19 +50,45 @@ The response is available via (call-response call)."
                               :channel channel
                               :method method
                               :stream-id stream-id
-                              :request-metadata metadata)))
-    ;; Send request headers
+                              :request-metadata metadata))
+         ;; Use provided timeout, fall back to channel default
+         (effective-timeout (or timeout (channel-default-timeout channel))))
+    ;; Send request headers (includes grpc-timeout for server-side enforcement)
     (channel-send-headers channel stream-id method
                           :metadata metadata
-                          :timeout timeout)
+                          :timeout effective-timeout)
     ;; Send request message with END_STREAM
     (let ((request-bytes (if (typep request 'vector)
                              request
                              (ag-proto:serialize-to-bytes request))))
       (channel-send-message channel stream-id request-bytes :end-stream t))
-    ;; Receive response headers
-    (let ((raw-headers (channel-receive-headers channel stream-id)))
-      (setf (call-response-headers call) raw-headers))
+    ;; Wrap blocking receive operations with client-side timeout enforcement
+    (flet ((do-receive ()
+             ;; Receive response headers
+             (let ((raw-headers (channel-receive-headers channel stream-id)))
+               (setf (call-response-headers call) raw-headers))
+             ;; Process headers and receive body/trailers (rest of the call)
+             (call-unary-process-response channel call stream-id response-type)))
+      (handler-case
+          (if effective-timeout
+              (bt2:with-timeout (effective-timeout)
+                (do-receive))
+              (do-receive))
+        (bt2:timeout ()
+          ;; Client-side deadline exceeded - cancel the stream
+          (channel-cancel-stream channel stream-id)
+          (setf (call-status call) +grpc-status-deadline-exceeded+)
+          (setf (call-status-message call) "Deadline exceeded")
+          (error 'grpc-status-error
+                 :code (call-status call)
+                 :message (call-status-message call)
+                 :headers (call-response-headers call)
+                 :trailers nil))))
+    call))
+
+(defun call-unary-process-response (channel call stream-id response-type)
+  "Process the response after headers are received.
+Validates headers, receives body and trailers, extracts status."
     ;; Check initial response status
     (let ((status-header (assoc :status (call-response-headers call))))
       (unless (and status-header (string= (cdr status-header) "200"))
@@ -164,8 +190,7 @@ The response is available via (call-response call)."
              :code (call-status call)
              :message (call-status-message call)
              :headers (call-response-headers call)
-             :trailers (call-response-trailers call)))
-    call))
+             :trailers (call-response-trailers call))))
 
 (defun ensure-connected (channel)
   "Ensure the channel is connected, connecting if necessary"

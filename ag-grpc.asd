@@ -6,7 +6,7 @@
   :license "MIT"
   :version "1.0.0"
   :serial t
-  :depends-on (#:ag-proto #:ag-http2 #:version-string)
+  :depends-on (#:ag-proto #:ag-http2 #:version-string #:bordeaux-threads)
   :pathname "ag-grpc"
   :components ((:file "package")
                (:file "status")
