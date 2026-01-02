@@ -18,11 +18,20 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 
 | Category | Tests | Status |
 |----------|-------|--------|
-| Unary RPC | 82 | ✅ Pass |
-| Client Streaming | 23 | ✅ Pass |
-| Server Streaming | 59 | ✅ Pass |
-| Bidi Streaming (half-duplex) | 25 | ✅ Pass |
-| **Total** | **189** | **100%** |
+| Basic RPC | 20 | ✅ Pass |
+| Client Cancellation | 40 | ✅ Pass |
+| Deadline Propagation | 16 | ✅ Pass |
+| Duplicate Metadata | 16 | ✅ Pass |
+| Errors | 88 | ✅ Pass |
+| HTTP to RPC Mapping | 8 | ✅ Pass |
+| Max Message Size | 48 | ✅ Pass |
+| Request Headers | 32 | ✅ Pass |
+| Response Headers | 32 | ✅ Pass |
+| Timeouts | 16 | ✅ Pass |
+| Trailers-Only | 24 | ✅ Pass |
+| Unimplemented | 16 | ✅ Pass |
+| Unicode | 3 | ✅ Pass |
+| **Total** | **359** | **100%** |
 
 ### Feature Support Matrix
 
@@ -37,7 +46,7 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 | Cancellation | ✅ | — |
 | TLS (h2) | ✅ | — |
 | Plaintext (h2c) | ✅ | ✅ |
-| Compression (gzip) | — | — |
+| Compression (gzip) | ✅ | — |
 
 ## Features
 
@@ -50,6 +59,7 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 - HTTP/2 client with stream multiplexing and flow control
 - **Full streaming support**: unary, server streaming, client streaming, and bidirectional streaming
 - **Stream collectors**: `collect-stream-messages`, `map-stream-messages`, `reduce-stream-messages`
+- **Message compression**: gzip compression support (via salza2/chipz)
 - Gray stream integration for composable I/O
 - Optional TLS/SSL support (via cl+ssl)
 - **gRPC Server**: handler registration, request context, streaming support
@@ -605,6 +615,8 @@ make interop
 - [iparse](https://github.com/atgreen/iparse) - Parser combinator library
 - [clingon](https://github.com/dnaeon/clingon) - CLI framework (for ag-protoc)
 - [version-string](https://github.com/atgreen/cl-version-string) - Version string generation
+- [chipz](https://github.com/froydnj/chipz) - Decompression library (for gzip)
+- [salza2](https://github.com/xach/salza2) - Compression library (for gzip)
 
 **Optional:**
 - [cl+ssl](https://github.com/cl-plus-ssl/cl-plus-ssl) - TLS/SSL support (requires OpenSSL)
