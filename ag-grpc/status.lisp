@@ -98,6 +98,21 @@ for the operation.")
   "Return T if the status code indicates success"
   (= code +grpc-status-ok+))
 
+(defun http-status-to-grpc-status (http-status)
+  "Map an HTTP status code to the corresponding gRPC status code.
+Per gRPC spec: https://github.com/grpc/grpc/blob/master/doc/http-grpc-status-mapping.md
+Only specific codes have defined mappings; all others map to UNKNOWN."
+  (case http-status
+    (400 +grpc-status-internal+)         ; Bad Request
+    (401 +grpc-status-unauthenticated+)  ; Unauthorized
+    (403 +grpc-status-permission-denied+) ; Forbidden
+    (404 +grpc-status-unimplemented+)    ; Not Found
+    (429 +grpc-status-unavailable+)      ; Too Many Requests
+    (502 +grpc-status-unavailable+)      ; Bad Gateway
+    (503 +grpc-status-unavailable+)      ; Service Unavailable
+    (504 +grpc-status-unavailable+)      ; Gateway Timeout
+    (t +grpc-status-unknown+)))
+
 ;;;; ========================================================================
 ;;;; Status Error Condition
 ;;;; ========================================================================

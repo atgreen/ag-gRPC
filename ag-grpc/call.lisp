@@ -66,28 +66,39 @@ The response is available via (call-response call)."
     ;; Check initial response status
     (let ((status-header (assoc :status (call-response-headers call))))
       (unless (and status-header (string= (cdr status-header) "200"))
-        (setf (call-status call) +grpc-status-unknown+)
-        (return-from call-unary call)))
-    ;; Check for "trailers-only" mode - gRPC status in headers (error without body)
-    (let ((grpc-status-header (assoc "grpc-status" (call-response-headers call)
-                                     :test #'string-equal)))
-      (when grpc-status-header
-        ;; Trailers-only response - status is in headers
-        (setf (call-status call) (parse-integer (cdr grpc-status-header)))
-        (let ((message-header (assoc "grpc-message" (call-response-headers call)
-                                     :test #'string-equal)))
-          (when message-header
-            (setf (call-status-message call)
-                  (percent-decode (cdr message-header)))))
-        ;; Signal error if not OK
-        (unless (grpc-status-ok-p (call-status call))
+        ;; Map HTTP status code to gRPC status
+        (let ((http-status (if status-header
+                               (parse-integer (cdr status-header) :junk-allowed t)
+                               0)))
+          (setf (call-status call)
+                (http-status-to-grpc-status (or http-status 0)))
+          (setf (call-response-trailers call) (call-response-headers call))
           (error 'grpc-status-error
                  :code (call-status call)
-                 :message (call-status-message call)
+                 :message (format nil "HTTP ~A" (or http-status "unknown"))
                  :headers (call-response-headers call)
-                 :trailers (call-response-headers call)))  ; trailers-only: trailers are in headers
-        (return-from call-unary call)))
-    ;; Receive response message
+                 :trailers (call-response-headers call)))))
+    ;; Validate content-type (must be application/grpc or application/grpc+*)
+    (let ((content-type-header (assoc "content-type" (call-response-headers call)
+                                      :test #'string-equal)))
+      (when content-type-header
+        (let ((content-type (cdr content-type-header)))
+          (unless (or (string= content-type "application/grpc")
+                      (and (>= (length content-type) 17)
+                           (string= (subseq content-type 0 17) "application/grpc+")))
+            ;; Invalid content-type - per spec, use UNKNOWN
+            (setf (call-status call) +grpc-status-unknown+)
+            (setf (call-response-trailers call) (call-response-headers call))
+            (error 'grpc-status-error
+                   :code (call-status call)
+                   :message (format nil "invalid content-type: ~A" content-type)
+                   :headers (call-response-headers call)
+                   :trailers (call-response-headers call))))))
+    ;; Note: Headers may contain grpc-status (trailers-only mode), but we need
+    ;; to check if there's also a body or separate trailers, which take precedence.
+    ;; So we don't return early here; we always try to receive body and trailers.
+
+    ;; Receive response message (may be nil)
     (let ((response-data (channel-receive-message channel stream-id)))
       (when response-data
         (setf (call-response call)
@@ -97,13 +108,31 @@ The response is available via (call-response call)."
     ;; Receive trailers (contains gRPC status)
     (let ((raw-trailers (channel-receive-trailers channel stream-id)))
       (setf (call-response-trailers call) raw-trailers))
-    ;; Extract status from trailers
-    (let ((status-trailer (assoc "grpc-status" (call-response-trailers call)
-                                 :test #'string-equal)))
-      (setf (call-status call)
-            (if status-trailer
-                (parse-integer (cdr status-trailer))
-                +grpc-status-ok+)))
+    ;; Extract status - prefer trailers, fall back to headers (trailers-only mode)
+    ;; But: if we got a body, we MUST use trailer status (ignore header status)
+    (let* ((status-trailer (assoc "grpc-status" (call-response-trailers call)
+                                  :test #'string-equal))
+           (status-header (assoc "grpc-status" (call-response-headers call)
+                                 :test #'string-equal))
+           (has-body (not (null (call-response call)))))
+      (cond
+        ;; Case 1: Status in trailers - always use this
+        (status-trailer
+         (setf (call-status call) (parse-integer (cdr status-trailer))))
+        ;; Case 2: Status in headers but we got a body - protocol error (ignore header status)
+        ((and status-header has-body)
+         ;; grpc-status in headers but body present = protocol error
+         (setf (call-status call) +grpc-status-internal+)
+         (setf (call-status-message call) "grpc-status in headers but body present"))
+        ;; Case 3: Status in headers, no body, no trailers = true trailers-only
+        (status-header
+         ;; Use the trailers from headers (copy them to trailers)
+         (setf (call-response-trailers call) (call-response-headers call))
+         (setf (call-status call) (parse-integer (cdr status-header))))
+        ;; Case 4: No status anywhere - protocol error
+        (t
+         (setf (call-status call) +grpc-status-internal+)
+         (setf (call-status-message call) "missing grpc-status"))))
     (let ((message-trailer (assoc "grpc-message" (call-response-trailers call)
                                   :test #'string-equal)))
       (when message-trailer
@@ -111,6 +140,17 @@ The response is available via (call-response call)."
               (percent-decode (cdr message-trailer)))))
     ;; Signal error if not OK
     (unless (grpc-status-ok-p (call-status call))
+      (error 'grpc-status-error
+             :code (call-status call)
+             :message (call-status-message call)
+             :headers (call-response-headers call)
+             :trailers (call-response-trailers call)))
+    ;; For unary calls, OK status but no response is an error
+    ;; Per spec, use UNIMPLEMENTED for this case
+    (when (and (grpc-status-ok-p (call-status call))
+               (null (call-response call)))
+      (setf (call-status call) +grpc-status-unimplemented+)
+      (setf (call-status-message call) "OK status but no response message")
       (error 'grpc-status-error
              :code (call-status call)
              :message (call-status-message call)
