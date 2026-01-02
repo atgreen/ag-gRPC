@@ -113,6 +113,19 @@ Only specific codes have defined mappings; all others map to UNKNOWN."
     (504 +grpc-status-unavailable+)      ; Gateway Timeout
     (t +grpc-status-unknown+)))
 
+(defun rst-stream-error-to-grpc-status (error-code)
+  "Map an HTTP/2 RST_STREAM error code to a gRPC status code.
+Per gRPC spec, when RST_STREAM is received without grpc-status:
+  - CANCEL (8) maps to CANCELLED
+  - REFUSED_STREAM (7) maps to UNAVAILABLE
+  - Other errors map to INTERNAL"
+  (case error-code
+    (#.ag-http2:+error-cancel+ +grpc-status-cancelled+)
+    (#.ag-http2:+error-refused-stream+ +grpc-status-unavailable+)
+    (#.ag-http2:+error-enhance-your-calm+ +grpc-status-resource-exhausted+)
+    (#.ag-http2:+error-inadequate-security+ +grpc-status-permission-denied+)
+    (t +grpc-status-internal+)))
+
 ;;;; ========================================================================
 ;;;; Status Error Condition
 ;;;; ========================================================================

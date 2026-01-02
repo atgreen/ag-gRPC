@@ -277,49 +277,78 @@ Returns (values response headers trailers status-code status-message)."
       (ag-grpc::channel-send-message conn stream-id request-bytes
                                       :end-stream t
                                       :encoding encoding))
-    ;; Receive response headers
-    (let ((raw-headers (ag-grpc::channel-receive-headers conn stream-id)))
-      ;; Check HTTP status
-      (let ((status-header (assoc :status raw-headers)))
-        (unless (and status-header (string= (cdr status-header) "200"))
-          (let ((http-status (if status-header (parse-integer (cdr status-header) :junk-allowed t) 0)))
-            (return-from run-compressed-unary-call
-              (values nil raw-headers raw-headers
-                      (ag-grpc::http-status-to-grpc-status (or http-status 0))
-                      (format nil "HTTP ~A" (or http-status "unknown")))))))
-      ;; Get response encoding for decompression
-      (let* ((response-encoding (ag-grpc::get-response-encoding raw-headers))
-             (response-data (ag-grpc::channel-receive-message conn stream-id response-encoding))
-             (response (when response-data
-                         (ag-proto:deserialize-from-bytes 'unary-response response-data))))
-        ;; Receive trailers
-        (let ((raw-trailers (ag-grpc::channel-receive-trailers conn stream-id)))
-          ;; Extract status
-          (let* ((status-trailer (assoc "grpc-status" raw-trailers :test #'string-equal))
-                 (status-header (assoc "grpc-status" raw-headers :test #'string-equal))
-                 (status-code (cond
-                                (status-trailer (parse-integer (cdr status-trailer)))
-                                (status-header (parse-integer (cdr status-header)))
-                                (t ag-grpc:+grpc-status-internal+)))
-                 (message-trailer (assoc "grpc-message" (or raw-trailers raw-headers)
-                                         :test #'string-equal))
-                 (status-message (when message-trailer
-                                   (ag-grpc::percent-decode (cdr message-trailer)))))
-            ;; Signal error if not OK
-            (unless (zerop status-code)
-              (error 'ag-grpc:grpc-status-error
-                     :code status-code
-                     :message status-message
-                     :headers raw-headers
-                     :trailers raw-trailers))
-            ;; Check for missing response
-            (when (and (zerop status-code) (null response))
-              (error 'ag-grpc:grpc-status-error
-                     :code ag-grpc:+grpc-status-unimplemented+
-                     :message "OK status but no response message"
-                     :headers raw-headers
-                     :trailers raw-trailers))
-            (values response raw-headers raw-trailers status-code status-message)))))))
+    ;; Define the receive logic
+    (labels ((do-receive ()
+               ;; Receive response headers
+               (let ((raw-headers (ag-grpc::channel-receive-headers conn stream-id)))
+                 ;; Check HTTP status
+                 (let ((status-header (assoc :status raw-headers)))
+                   (unless (and status-header (string= (cdr status-header) "200"))
+                     (let ((http-status (if status-header (parse-integer (cdr status-header) :junk-allowed t) 0)))
+                       (return-from do-receive
+                         (values nil raw-headers raw-headers
+                                 (ag-grpc::http-status-to-grpc-status (or http-status 0))
+                                 (format nil "HTTP ~A" (or http-status "unknown")))))))
+                 ;; Get response encoding for decompression
+                 (let* ((response-encoding (ag-grpc::get-response-encoding raw-headers))
+                        (response-data (ag-grpc::channel-receive-message conn stream-id response-encoding))
+                        (response (when response-data
+                                    (ag-proto:deserialize-from-bytes 'unary-response response-data))))
+                   ;; Receive trailers
+                   (let ((raw-trailers (ag-grpc::channel-receive-trailers conn stream-id)))
+                     ;; Check for RST_STREAM error if we got no data and no trailers
+                     (let ((rst-error (ag-http2:stream-rst-stream-error
+                                       (ag-http2:multiplexer-get-stream
+                                        (ag-http2:connection-multiplexer (ag-grpc::channel-connection conn))
+                                        stream-id))))
+                       ;; Extract status
+                       (let* ((status-trailer (assoc "grpc-status" raw-trailers :test #'string-equal))
+                              (status-header (assoc "grpc-status" raw-headers :test #'string-equal))
+                              (status-code (cond
+                                             (status-trailer (parse-integer (cdr status-trailer)))
+                                             (status-header (parse-integer (cdr status-header)))
+                                             ;; If RST_STREAM with CANCEL and we had timeout, assume deadline exceeded
+                                             ((and rst-error (= rst-error ag-http2:+error-cancel+) timeout-seconds)
+                                              ag-grpc:+grpc-status-deadline-exceeded+)
+                                             ;; Otherwise map RST_STREAM error to gRPC status
+                                             (rst-error (ag-grpc::rst-stream-error-to-grpc-status rst-error))
+                                             (t ag-grpc:+grpc-status-internal+)))
+                              (message-trailer (assoc "grpc-message" (or raw-trailers raw-headers)
+                                                      :test #'string-equal))
+                              (status-message (cond
+                                               (message-trailer
+                                                (ag-grpc::percent-decode (cdr message-trailer)))
+                                               ;; Add message for deadline exceeded from RST_STREAM
+                                               ((and rst-error (= rst-error ag-http2:+error-cancel+) timeout-seconds)
+                                                "Deadline exceeded"))))
+                       ;; Signal error if not OK
+                       (unless (zerop status-code)
+                         (error 'ag-grpc:grpc-status-error
+                                :code status-code
+                                :message status-message
+                                :headers raw-headers
+                                :trailers raw-trailers))
+                       ;; Check for missing response
+                       (when (and (zerop status-code) (null response))
+                         (error 'ag-grpc:grpc-status-error
+                                :code ag-grpc:+grpc-status-unimplemented+
+                                :message "OK status but no response message"
+                                :headers raw-headers
+                                :trailers raw-trailers))
+                       (values response raw-headers raw-trailers status-code status-message))))))))
+      ;; Apply client-side timeout if specified
+      (if timeout-seconds
+          (handler-case
+              (bt2:with-timeout (timeout-seconds)
+                (do-receive))
+            (bt2:timeout ()
+              ;; Cancel the stream and return deadline exceeded
+              (ag-grpc:channel-cancel-stream conn stream-id)
+              (log-msg "Compressed unary deadline exceeded")
+              (values nil nil nil
+                      ag-grpc:+grpc-status-deadline-exceeded+
+                      "Deadline exceeded")))
+          (do-receive)))))
 
 (defun run-unary-call (conn service method request-messages codec metadata timeout-ms &optional encoding)
   "Execute a unary gRPC call and return the response.

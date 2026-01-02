@@ -99,6 +99,7 @@
    #:stream-headers
    #:stream-trailers
    #:stream-data-buffer
+   #:stream-rst-stream-error
    #:stream-can-send-p
    #:stream-can-recv-p
    #:stream-consume-data

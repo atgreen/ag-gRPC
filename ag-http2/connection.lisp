@@ -356,7 +356,12 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
        (when (plusp (logand (frame-flags frame) +flag-end-stream+))
          (stream-transition stream :recv-end-stream))))
     (rst-stream-frame
-     (let ((stream-id (frame-stream-id frame)))
+     (let* ((stream-id (frame-stream-id frame))
+            (error-code (rst-stream-frame-error-code frame))
+            (stream (multiplexer-get-stream (connection-multiplexer conn) stream-id)))
+       ;; Store the error code before closing the stream
+       (when stream
+         (setf (stream-rst-stream-error stream) error-code))
        (multiplexer-close-stream (connection-multiplexer conn) stream-id)))))
 
 ;;;; ========================================================================

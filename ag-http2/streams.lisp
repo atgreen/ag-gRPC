@@ -32,7 +32,9 @@
                 :accessor stream-data-buffer
                 :documentation "Buffered data frames")
    (trailers :initform nil :accessor stream-trailers
-             :documentation "Received trailers"))
+             :documentation "Received trailers")
+   (rst-stream-error :initform nil :accessor stream-rst-stream-error
+                     :documentation "RST_STREAM error code if received"))
   (:documentation "Represents an HTTP/2 stream"))
 
 (defun make-http2-stream (id &key (initial-window-size 65535))
