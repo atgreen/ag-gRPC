@@ -316,21 +316,31 @@ Timeout is specified in seconds."
                  (format out "%~2,'0X" code)))))
 
 (defun percent-decode (string)
-  "Percent-decode a string from grpc-message header"
-  (with-output-to-string (out)
+  "Percent-decode a string from grpc-message header.
+Properly handles UTF-8 encoded bytes."
+  ;; First pass: collect bytes (percent-encoded bytes become raw bytes,
+  ;; ASCII characters become their byte values)
+  (let ((bytes (make-array (length string)
+                           :element-type '(unsigned-byte 8)
+                           :adjustable t
+                           :fill-pointer 0)))
     (loop with i = 0
           with len = (length string)
           while (< i len)
           for char = (char string i)
           do (cond
                ((and (char= char #\%)
-                     (< (+ i 2) len))
-                (write-char (code-char (parse-integer string
-                                                       :start (1+ i)
-                                                       :end (+ i 3)
-                                                       :radix 16))
-                            out)
+                     (<= (+ i 2) len))
+                ;; Percent-encoded byte
+                (vector-push-extend (parse-integer string
+                                                   :start (1+ i)
+                                                   :end (+ i 3)
+                                                   :radix 16)
+                                    bytes)
                 (incf i 3))
                (t
-                (write-char char out)
-                (incf i))))))
+                ;; Plain ASCII character
+                (vector-push-extend (char-code char) bytes)
+                (incf i))))
+    ;; Convert UTF-8 bytes to string
+    (trivial-utf-8:utf-8-bytes-to-string bytes)))
