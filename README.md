@@ -43,10 +43,18 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 | Bidirectional Streaming | ✅ | ✅ |
 | Metadata | ✅ | ✅ |
 | Deadlines/Timeouts | ✅ | ✅ |
-| Cancellation | ✅ | — |
+| Cancellation | ✅ | ✅ |
+| Interceptors | ✅ | ✅ |
+| Health Checking | — | ✅ |
+| Reflection | — | ✅ |
 | TLS (h2) | ✅ | ✅ |
 | Plaintext (h2c) | ✅ | ✅ |
 | Compression (gzip) | ✅ | ✅ |
+| Retry Policies | ✅ | — |
+| Load Balancing | ✅ | — |
+| Channel Pooling | ✅ | — |
+| Wait-for-Ready | ✅ | — |
+| Rich Error Details | ✅ | ✅ |
 
 ## Features
 
@@ -63,6 +71,13 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 - Gray stream integration for composable I/O
 - Optional TLS/SSL support (via cl+ssl)
 - **gRPC Server**: handler registration, request context, streaming support
+- **Interceptors**: client and server middleware for logging, auth, metrics
+- **Health checking**: standard grpc.health.v1.Health service
+- **Server reflection**: grpc.reflection.v1alpha for service discovery
+- **Retry policies**: automatic retry with exponential backoff
+- **Load balancing**: round-robin and pick-first policies with DNS discovery
+- **Channel pooling**: connection reuse and wait-for-ready semantics
+- **Rich error details**: google.rpc.Status with ErrorInfo, RetryInfo, DebugInfo
 - Interoperability tested against Go gRPC servers
 
 ## Installation
@@ -490,6 +505,298 @@ ag-gRPC includes full server-side support for hosting gRPC services:
   (make-response request))
 ```
 
+### Detecting Client Cancellation
+
+Server handlers can detect when clients cancel RPCs:
+
+```lisp
+(defun handle-long-operation (request ctx)
+  "Handler that checks for cancellation during long operations"
+  (loop for i from 1 to 1000
+        do (progn
+             ;; Check if client cancelled
+             (when (ag-grpc:context-check-cancelled ctx)
+               (return-from handle-long-operation nil))
+             ;; Do work
+             (perform-step i)))
+  (make-response))
+```
+
+## Interceptors (Middleware)
+
+ag-gRPC supports server-side interceptors for cross-cutting concerns like logging, authentication, and metrics:
+
+### Using Built-in Interceptors
+
+```lisp
+;; Add logging interceptor
+(ag-grpc:server-add-interceptor server
+  (ag-grpc:make-logging-interceptor :stream *standard-output*))
+
+;; Add metrics interceptor
+(defvar *metrics* (ag-grpc:make-metrics-interceptor))
+(ag-grpc:server-add-interceptor server *metrics*)
+
+;; Query metrics later
+(multiple-value-bind (calls avg-ms errors)
+    (ag-grpc:metrics-get-stats *metrics* "/hello.Greeter/SayHello")
+  (format t "Calls: ~A, Avg: ~,2Fms, Errors: ~A~%" calls avg-ms errors))
+```
+
+### Creating Custom Interceptors
+
+```lisp
+(defclass auth-interceptor (ag-grpc:server-interceptor)
+  ((required-token :initarg :token :reader required-token)))
+
+(defmethod ag-grpc:interceptor-call-start ((i auth-interceptor) ctx handler-info)
+  "Check authentication before handler runs"
+  (let ((token (ag-grpc:metadata-get (ag-grpc:context-metadata ctx) "authorization")))
+    (unless (equal token (required-token i))
+      (error 'ag-grpc:grpc-status-error
+             :code ag-grpc:+grpc-status-unauthenticated+
+             :message "Invalid or missing token")))
+  ;; Return start time for timing in call-end
+  (get-internal-real-time))
+
+(defmethod ag-grpc:interceptor-call-end ((i auth-interceptor) ctx handler-info
+                                          call-context response error)
+  "Log after handler completes"
+  (let ((elapsed-ms (/ (- (get-internal-real-time) call-context)
+                       (/ internal-time-units-per-second 1000.0))))
+    (format t "~A completed in ~,2Fms~%"
+            (getf handler-info :method-path) elapsed-ms))
+  response)
+
+;; Use custom interceptor
+(ag-grpc:server-add-interceptor server
+  (make-instance 'auth-interceptor :token "secret-token"))
+```
+
+### Interceptor Hooks
+
+| Method | Called | Use Case |
+|--------|--------|----------|
+| `interceptor-call-start` | Before handler | Auth, logging, timing start |
+| `interceptor-call-end` | After handler | Logging, metrics, response modification |
+| `interceptor-recv-message` | Each received message | Validation, transformation |
+| `interceptor-send-message` | Each sent message | Transformation, logging |
+
+## Health Checking
+
+ag-gRPC implements the standard [gRPC Health Checking Protocol](https://github.com/grpc/grpc/blob/master/doc/health-checking.md) for load balancer integration:
+
+### Enabling Health Checking
+
+```lisp
+;; Enable health checking on server
+(defvar *health* (ag-grpc:server-enable-health-checking server))
+
+;; Server automatically responds to:
+;; - /grpc.health.v1.Health/Check (unary)
+;; - /grpc.health.v1.Health/Watch (server streaming)
+```
+
+### Managing Service Health
+
+```lisp
+;; Set status for a specific service
+(ag-grpc:health-set-status *health* "my.service.Name" ag-grpc:+health-serving+)
+
+;; Mark service as not serving
+(ag-grpc:health-set-status *health* "my.service.Name" ag-grpc:+health-not-serving+)
+
+;; Get current status
+(ag-grpc:health-get-status *health* "my.service.Name")
+
+;; Clear status (will return SERVICE_UNKNOWN)
+(ag-grpc:health-clear-status *health* "my.service.Name")
+```
+
+### Health Status Constants
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `+health-unknown+` | 0 | Status not set |
+| `+health-serving+` | 1 | Healthy and serving |
+| `+health-not-serving+` | 2 | Not accepting requests |
+| `+health-service-unknown+` | 3 | Service not registered |
+
+### Testing with grpc-health-probe
+
+```bash
+# Install grpc-health-probe
+go install github.com/grpc-ecosystem/grpc-health-probe@latest
+
+# Check overall server health
+grpc-health-probe -addr=localhost:50051
+
+# Check specific service
+grpc-health-probe -addr=localhost:50051 -service=my.service.Name
+```
+
+## Retry Policies
+
+ag-gRPC supports automatic retry with configurable backoff for transient failures:
+
+```lisp
+;; Create a retry policy
+(defvar *retry* (ag-grpc:make-retry-policy
+                  :max-attempts 5
+                  :initial-backoff 0.1     ; 100ms
+                  :max-backoff 10.0        ; 10 seconds
+                  :backoff-multiplier 2.0))
+
+;; Make a call with retry
+(ag-grpc:call-unary-with-retry channel method request
+                                :retry-policy *retry*)
+
+;; Or use the macro
+(ag-grpc:with-retry (*retry*)
+  (ag-grpc:call-unary channel method request))
+```
+
+### Retryable Status Codes
+
+By default, these status codes trigger retry:
+- `UNAVAILABLE` - Server temporarily unavailable
+- `RESOURCE_EXHAUSTED` - Rate limited
+- `ABORTED` - Operation aborted
+
+## Load Balancing
+
+ag-gRPC supports client-side load balancing with multiple policies:
+
+### Round-Robin
+
+```lisp
+;; Create a round-robin balancer with multiple endpoints
+(defvar *balancer* (ag-grpc:make-round-robin-balancer
+                     '(("server1.example.com" . 50051)
+                       ("server2.example.com" . 50051)
+                       ("server3.example.com" . 50051))
+                     :tls t))
+
+;; Get a channel and make calls
+(ag-grpc:with-balanced-channel (ch *balancer*)
+  (ag-grpc:call-unary ch method request))
+```
+
+### Pick-First (Failover)
+
+```lisp
+;; Pick-first uses the first available endpoint
+(defvar *balancer* (ag-grpc:make-pick-first-balancer endpoints))
+```
+
+### DNS-Based Discovery
+
+```lisp
+;; Automatically discover endpoints via DNS
+(defvar *balancer* (ag-grpc:make-dns-balancer "grpc.example.com" 50051
+                                               :refresh-interval 30))
+```
+
+## Channel Pooling
+
+Reuse connections across multiple operations:
+
+```lisp
+;; Create a channel pool
+(defvar *pool* (ag-grpc:make-channel-pool "server.example.com" 50051
+                                           :max-size 10
+                                           :tls t))
+
+;; Get a channel from the pool
+(ag-grpc:with-pooled-channel (ch *pool*)
+  (ag-grpc:call-unary ch method request))
+
+;; Clean up
+(ag-grpc:pool-close *pool*)
+```
+
+### Wait-for-Ready
+
+Queue requests until channel becomes ready:
+
+```lisp
+;; Wait for channel to be ready before calling
+(ag-grpc:with-wait-for-ready (channel :timeout 30)
+  (ag-grpc:call-unary channel method request))
+```
+
+## Client Interceptors
+
+Add middleware to outgoing calls for logging, authentication, metrics:
+
+```lisp
+;; Add logging interceptor to channel
+(ag-grpc:channel-add-interceptor channel
+  (ag-grpc:make-client-logging-interceptor))
+
+;; Add metrics interceptor
+(defvar *metrics* (ag-grpc:make-client-metrics-interceptor))
+(ag-grpc:channel-add-interceptor channel *metrics*)
+
+;; Query metrics
+(multiple-value-bind (calls avg-ms errors)
+    (ag-grpc:client-metrics-get-stats *metrics* "/hello.Greeter/SayHello")
+  (format t "Calls: ~A, Avg: ~,2Fms, Errors: ~A~%" calls avg-ms errors))
+```
+
+### Custom Client Interceptor
+
+```lisp
+(defclass auth-interceptor (ag-grpc:client-interceptor)
+  ((token :initarg :token :reader auth-token)))
+
+(defmethod ag-grpc:client-interceptor-call-start ((i auth-interceptor) call-info)
+  ;; Add auth token to metadata
+  (format t "Calling ~A with auth~%" (getf call-info :method))
+  nil)
+```
+
+## Server Reflection
+
+Enable runtime service discovery for tools like grpcurl:
+
+```lisp
+;; Enable reflection on server
+(ag-grpc:server-enable-reflection server)
+
+;; Now tools can discover services:
+;; grpcurl -plaintext localhost:50051 list
+;; grpcurl -plaintext localhost:50051 describe my.Service
+```
+
+## Rich Error Details
+
+Return structured error information beyond status codes:
+
+```lisp
+;; Signal error with details
+(error (ag-grpc:make-rich-status-error
+         ag-grpc:+grpc-status-invalid-argument+
+         "Invalid email format"
+         (ag-grpc:make-error-info "INVALID_FORMAT" "myapp.example.com"
+                                   '(("field" . "email")
+                                     ("expected" . "valid email address")))))
+
+;; With retry information
+(error (ag-grpc:make-rich-status-error
+         ag-grpc:+grpc-status-resource-exhausted+
+         "Rate limit exceeded"
+         (ag-grpc:make-retry-info 30)))  ; retry after 30 seconds
+
+;; Extract details from error
+(handler-case
+    (make-rpc-call)
+  (ag-grpc:grpc-status-error (e)
+    (let ((status (ag-grpc:extract-status-details e)))
+      (when status
+        (format t "Error: ~A~%" (ag-grpc:rpc-status-message status))))))
+```
+
 ## TLS/SSL Support
 
 ag-gRPC supports optional TLS encryption via [cl+ssl](https://github.com/cl-plus-ssl/cl-plus-ssl).
@@ -646,13 +953,6 @@ Tested on:
 - SBCL
 
 Should work on other implementations supporting usocket.
-
-## Limitations
-
-Current limitations (contributions welcome!):
-
-- No load balancing or service discovery
-- No deadline propagation
 
 ## License
 

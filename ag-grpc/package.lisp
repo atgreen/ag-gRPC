@@ -153,10 +153,149 @@
    #:context-metadata
    #:context-peer-address
    #:context-deadline
+   #:context-cancelled-p
+   #:context-check-cancelled
    #:context-set-response-metadata
    #:context-set-trailing-metadata
 
    ;; Server streams
    #:grpc-server-call-stream
    #:stream-recv
-   #:do-stream-recv))
+   #:do-stream-recv
+
+   ;; Interceptors
+   #:server-interceptor
+   #:interceptor-call-start
+   #:interceptor-call-end
+   #:interceptor-recv-message
+   #:interceptor-send-message
+   #:server-add-interceptor
+   #:server-interceptors
+   ;; Built-in server interceptors
+   #:logging-interceptor
+   #:make-logging-interceptor
+   #:metrics-interceptor
+   #:make-metrics-interceptor
+   #:metrics-get-stats
+
+   ;; Client interceptors
+   #:client-interceptor
+   #:client-interceptor-call-start
+   #:client-interceptor-call-end
+   #:client-interceptor-send-message
+   #:client-interceptor-recv-message
+   #:channel-add-interceptor
+   #:channel-interceptors
+   ;; Built-in client interceptors
+   #:client-logging-interceptor
+   #:make-client-logging-interceptor
+   #:client-metrics-interceptor
+   #:make-client-metrics-interceptor
+   #:client-metrics-get-stats
+   #:metadata-interceptor
+   #:make-metadata-interceptor
+
+   ;; Retry policies
+   #:retry-policy
+   #:make-retry-policy
+   #:retry-max-attempts
+   #:retry-initial-backoff
+   #:retry-max-backoff
+   #:retry-backoff-multiplier
+   #:retry-retryable-status-codes
+   #:call-with-retry
+   #:with-retry
+   #:call-unary-with-retry
+   #:channel-set-retry-policy
+   #:channel-get-retry-policy
+
+   ;; Channel state and wait-for-ready
+   #:channel-state
+   #:channel-ready-p
+   #:channel-wait-for-ready
+   #:call-when-ready
+   #:with-wait-for-ready
+
+   ;; Keepalive
+   #:keepalive-config
+   #:make-keepalive-config
+   #:keepalive-ping-interval
+   #:keepalive-ping-timeout
+   #:keepalive-permit-without-calls
+   #:channel-ping
+   #:channel-check-health
+
+   ;; Channel pool
+   #:channel-pool
+   #:make-channel-pool
+   #:pool-get-channel
+   #:pool-release-channel
+   #:pool-close
+   #:with-pooled-channel
+
+   ;; Load balancing
+   #:load-balancer
+   #:balancer-pick
+   #:balancer-report-success
+   #:balancer-report-failure
+   #:balancer-endpoints
+   #:balancer-get-channel
+   #:balancer-close-all
+   #:balancer-add-endpoint
+   #:balancer-remove-endpoint
+   #:with-balanced-channel
+   ;; Pick-first policy
+   #:pick-first-balancer
+   #:make-pick-first-balancer
+   ;; Round-robin policy
+   #:round-robin-balancer
+   #:make-round-robin-balancer
+   ;; DNS-based discovery
+   #:dns-resolver
+   #:make-dns-resolver
+   #:resolve-hostname
+   #:dns-balancer
+   #:make-dns-balancer
+   #:dns-balancer-refresh
+
+   ;; Health checking
+   #:health-check-request
+   #:health-request-service
+   #:health-check-response
+   #:health-response-status
+   #:+health-unknown+
+   #:+health-serving+
+   #:+health-not-serving+
+   #:+health-service-unknown+
+   #:health-service
+   #:make-health-service
+   #:health-set-status
+   #:health-get-status
+   #:health-clear-status
+   #:server-enable-health-checking
+
+   ;; Reflection service
+   #:reflection-service
+   #:make-reflection-service
+   #:server-enable-reflection
+
+   ;; Rich error details (google.rpc.Status)
+   #:rpc-status
+   #:rpc-status-code
+   #:rpc-status-message
+   #:rpc-status-details
+   #:proto-any
+   #:any-type-url
+   #:any-value
+   #:make-any
+   #:error-info
+   #:make-error-info
+   #:error-info-reason
+   #:error-info-domain
+   #:error-info-metadata
+   #:retry-info
+   #:make-retry-info
+   #:debug-info
+   #:make-debug-info
+   #:make-rich-status-error
+   #:extract-status-details))

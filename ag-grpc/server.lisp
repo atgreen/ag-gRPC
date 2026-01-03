@@ -30,7 +30,9 @@
                     :documentation "Path to TLS certificate file")
    (tls-key :initarg :tls-key :accessor server-tls-key
             :initform nil
-            :documentation "Path to TLS private key file"))
+            :documentation "Path to TLS private key file")
+   (interceptors :initform nil :accessor server-interceptors
+                 :documentation "List of server interceptors"))
   (:documentation "gRPC server"))
 
 (defun make-grpc-server (port &key (host "0.0.0.0") tls tls-certificate tls-key
@@ -50,6 +52,13 @@ TLS-KEY - Path to TLS private key file"
                  :tls-certificate tls-certificate
                  :tls-key tls-key
                  :max-concurrent-streams max-concurrent-streams))
+
+(defun server-add-interceptor (server interceptor)
+  "Add an interceptor to the server's interceptor chain.
+Interceptors are called in the order they are added."
+  (setf (server-interceptors server)
+        (append (server-interceptors server) (list interceptor)))
+  server)
 
 ;;;; ========================================================================
 ;;;; Handler Registration
@@ -145,6 +154,19 @@ SERVER-STREAMING - T if server sends multiple messages"
 (defun context-set-trailing-metadata (ctx metadata)
   "Set trailing metadata to be sent with trailers"
   (setf (context-trailing-metadata ctx) metadata))
+
+(defun context-check-cancelled (ctx)
+  "Check if the client has cancelled this RPC.
+Updates and returns context-cancelled-p. Handlers can call this periodically
+during long operations to detect client cancellation early."
+  (unless (context-cancelled-p ctx)
+    (let* ((stream-id (context-stream-id ctx))
+           (h2-stream (ag-http2:multiplexer-get-stream
+                       (ag-http2:connection-multiplexer (context-connection ctx))
+                       stream-id)))
+      (when (and h2-stream (ag-http2:stream-rst-stream-error h2-stream))
+        (setf (context-cancelled-p ctx) t))))
+  (context-cancelled-p ctx))
 
 ;;;; ========================================================================
 ;;;; Server Call Stream (for streaming RPCs)
@@ -349,28 +371,46 @@ If GRACEFUL is true, wait for active connections to finish."
 
 (defun server-dispatch-handler (server conn ctx handler request-data)
   "Dispatch to the appropriate handler based on streaming type"
-  (declare (ignore server))
-  (let ((client-streaming (handler-client-streaming-p handler))
-        (server-streaming (handler-server-streaming-p handler)))
-    (cond
-      ;; Unary RPC: single request, single response
-      ((and (not client-streaming) (not server-streaming))
-       (server-handle-unary conn ctx handler request-data))
-      ;; Server streaming: single request, multiple responses
-      ((and (not client-streaming) server-streaming)
-       (server-handle-server-streaming conn ctx handler request-data))
-      ;; Client streaming: multiple requests, single response
-      ((and client-streaming (not server-streaming))
-       (server-handle-client-streaming conn ctx handler request-data))
-      ;; Bidirectional streaming: multiple requests, multiple responses
-      (t
-       (server-handle-bidi-streaming conn ctx handler request-data)))))
+  (let* ((client-streaming (handler-client-streaming-p handler))
+         (server-streaming (handler-server-streaming-p handler))
+         (handler-type (cond
+                         ((and (not client-streaming) (not server-streaming)) :unary)
+                         ((and (not client-streaming) server-streaming) :server-streaming)
+                         ((and client-streaming (not server-streaming)) :client-streaming)
+                         (t :bidi-streaming)))
+         (interceptors (server-interceptors server))
+         (handler-info (list :method-path (context-method-path ctx)
+                             :handler-type handler-type))
+         (call-contexts nil)
+         (response nil)
+         (error-occurred nil))
+    ;; Run pre-handler interceptors
+    (when interceptors
+      (setf call-contexts (run-interceptors-call-start interceptors ctx handler-info)))
+    ;; Dispatch to handler
+    (handler-case
+        (setf response
+              (case handler-type
+                (:unary
+                 (server-handle-unary conn ctx handler request-data interceptors))
+                (:server-streaming
+                 (server-handle-server-streaming conn ctx handler request-data interceptors))
+                (:client-streaming
+                 (server-handle-client-streaming conn ctx handler request-data interceptors))
+                (:bidi-streaming
+                 (server-handle-bidi-streaming conn ctx handler request-data interceptors))))
+      (error (e)
+        (setf error-occurred e)))
+    ;; Run post-handler interceptors
+    (when interceptors
+      (run-interceptors-call-end interceptors ctx handler-info
+                                  call-contexts response error-occurred))))
 
 ;;;; ========================================================================
 ;;;; Unary RPC Handler
 ;;;; ========================================================================
 
-(defun server-handle-unary (conn ctx handler request-data)
+(defun server-handle-unary (conn ctx handler request-data &optional interceptors)
   "Handle a unary RPC call"
   (handler-case
       (let* ((request-type (handler-request-type handler))
@@ -381,25 +421,37 @@ If GRACEFUL is true, wait for active connections to finish."
                           (declare (ignore compressed consumed))
                           (when msg-data
                             (ag-proto:deserialize-from-bytes request-type msg-data)))))
+             ;; Run recv interceptors on request
+             (processed-request (if interceptors
+                                    (run-interceptors-recv-message interceptors ctx request)
+                                    request))
              (handler-fn (handler-function handler))
-             (response (funcall handler-fn request ctx)))
+             (response (funcall handler-fn processed-request ctx))
+             ;; Run send interceptors on response
+             (processed-response (if interceptors
+                                     (run-interceptors-send-message interceptors ctx response)
+                                     response)))
         ;; Send response
-        (server-send-response conn ctx response))
+        (server-send-response conn ctx processed-response)
+        processed-response)
     (grpc-status-error (e)
       (server-send-error conn (context-stream-id ctx)
                          (grpc-status-error-code e)
-                         (grpc-status-error-message e)))
+                         (grpc-status-error-message e))
+      (error e))
     (error (e)
       (server-send-error conn (context-stream-id ctx)
                          +grpc-status-internal+
-                         (format nil "Internal error: ~A" e)))))
+                         (format nil "Internal error: ~A" e))
+      (error e))))
 
 ;;;; ========================================================================
 ;;;; Server Streaming RPC Handler
 ;;;; ========================================================================
 
-(defun server-handle-server-streaming (conn ctx handler request-data)
+(defun server-handle-server-streaming (conn ctx handler request-data &optional interceptors)
   "Handle a server streaming RPC call"
+  (declare (ignore interceptors))  ; Message interception happens in stream-send
   (handler-case
       (let* ((request-type (handler-request-type handler))
              (response-type (handler-response-type handler))
@@ -426,19 +478,21 @@ If GRACEFUL is true, wait for active connections to finish."
     (grpc-status-error (e)
       (server-send-error conn (context-stream-id ctx)
                          (grpc-status-error-code e)
-                         (grpc-status-error-message e)))
+                         (grpc-status-error-message e))
+      (error e))
     (error (e)
       (server-send-error conn (context-stream-id ctx)
                          +grpc-status-internal+
-                         (format nil "Internal error: ~A" e)))))
+                         (format nil "Internal error: ~A" e))
+      (error e))))
 
 ;;;; ========================================================================
 ;;;; Client Streaming RPC Handler
 ;;;; ========================================================================
 
-(defun server-handle-client-streaming (conn ctx handler request-data)
+(defun server-handle-client-streaming (conn ctx handler request-data &optional interceptors)
   "Handle a client streaming RPC call"
-  (declare (ignore request-data))  ; Data comes via stream-recv
+  (declare (ignore request-data interceptors))  ; Data comes via stream-recv
   (handler-case
       (let* ((request-type (handler-request-type handler))
              (response-type (handler-response-type handler))
@@ -453,23 +507,26 @@ If GRACEFUL is true, wait for active connections to finish."
         ;; Handler should call stream-recv to get messages
         (let ((response (funcall handler-fn ctx stream)))
           ;; Send response
-          (server-send-response conn ctx response)))
+          (server-send-response conn ctx response)
+          response))
     (grpc-status-error (e)
       (server-send-error conn (context-stream-id ctx)
                          (grpc-status-error-code e)
-                         (grpc-status-error-message e)))
+                         (grpc-status-error-message e))
+      (error e))
     (error (e)
       (server-send-error conn (context-stream-id ctx)
                          +grpc-status-internal+
-                         (format nil "Internal error: ~A" e)))))
+                         (format nil "Internal error: ~A" e))
+      (error e))))
 
 ;;;; ========================================================================
 ;;;; Bidirectional Streaming RPC Handler
 ;;;; ========================================================================
 
-(defun server-handle-bidi-streaming (conn ctx handler request-data)
+(defun server-handle-bidi-streaming (conn ctx handler request-data &optional interceptors)
   "Handle a bidirectional streaming RPC call"
-  (declare (ignore request-data))
+  (declare (ignore request-data interceptors))
   (handler-case
       (let* ((request-type (handler-request-type handler))
              (response-type (handler-response-type handler))
@@ -489,11 +546,13 @@ If GRACEFUL is true, wait for active connections to finish."
     (grpc-status-error (e)
       (server-send-error conn (context-stream-id ctx)
                          (grpc-status-error-code e)
-                         (grpc-status-error-message e)))
+                         (grpc-status-error-message e))
+      (error e))
     (error (e)
       (server-send-error conn (context-stream-id ctx)
                          +grpc-status-internal+
-                         (format nil "Internal error: ~A" e)))))
+                         (format nil "Internal error: ~A" e))
+      (error e))))
 
 ;;;; ========================================================================
 ;;;; Stream Operations (for handlers)
@@ -503,6 +562,11 @@ If GRACEFUL is true, wait for active connections to finish."
   "Send a message on a server stream"
   (when (server-stream-send-closed-p stream)
     (error "Cannot send on closed stream"))
+  ;; Check if client cancelled
+  (when (context-check-cancelled (server-stream-context stream))
+    (error 'grpc-status-error
+           :code +grpc-status-cancelled+
+           :message "Client cancelled the RPC"))
   (let* ((conn (server-stream-connection stream))
          (stream-id (server-stream-id stream))
          (response-encoding (context-response-encoding (server-stream-context stream)))
@@ -544,6 +608,11 @@ Returns the deserialized message, or NIL if no more messages."
         (setf (server-stream-recv-closed-p stream) t)
         (return-from stream-recv nil))
       (ag-http2:connection-read-frame conn)
+      ;; Check for client cancellation (RST_STREAM received)
+      (when (ag-http2:stream-rst-stream-error h2-stream)
+        (setf (context-cancelled-p (server-stream-context stream)) t)
+        (setf (server-stream-recv-closed-p stream) t)
+        (return-from stream-recv nil))
       ;; Copy new data to our buffer
       (let ((new-data (ag-http2:stream-consume-data h2-stream)))
         (loop for byte across new-data

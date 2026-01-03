@@ -29,7 +29,10 @@
                     :documentation "Default timeout in seconds")
    (metadata :initarg :metadata :accessor channel-metadata
              :initform nil
-             :documentation "Default metadata for all calls"))
+             :documentation "Default metadata for all calls")
+   (interceptors :initarg :interceptors :accessor channel-interceptors
+                 :initform nil
+                 :documentation "List of client interceptors"))
   (:documentation "gRPC client channel"))
 
 (defun make-channel (host port &key (connect t) (timeout 30 timeout-supplied-p) metadata tls (tls-verify nil))
@@ -91,6 +94,13 @@ Convenience function equivalent to (make-channel ... :tls t)."
 (defun channel-set-default-timeout (channel seconds)
   "Set the default timeout for calls"
   (setf (channel-default-timeout channel) seconds))
+
+(defun channel-add-interceptor (channel interceptor)
+  "Add an interceptor to the channel's interceptor chain.
+Interceptors are called in order for outgoing calls."
+  (setf (channel-interceptors channel)
+        (append (channel-interceptors channel) (list interceptor)))
+  channel)
 
 ;;;; ========================================================================
 ;;;; Low-Level Stream Operations
