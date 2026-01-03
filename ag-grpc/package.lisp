@@ -298,4 +298,98 @@
    #:debug-info
    #:make-debug-info
    #:make-rich-status-error
-   #:extract-status-details))
+   #:extract-status-details
+
+   ;; Async/Future API
+   #:grpc-future
+   #:make-grpc-future
+   #:future-pending-p
+   #:future-fulfilled-p
+   #:future-rejected-p
+   #:future-done-p
+   #:future-fulfill
+   #:future-reject
+   #:future-wait
+   #:future-get
+   #:future-then
+   #:future-catch
+   #:future-finally
+   #:future-cancel
+   #:future-result
+   #:future-error
+   #:future-state
+   #:call-unary-async
+   #:call-server-stream-async
+   #:future-all
+   #:future-race
+   #:future-any
+
+   ;; Circuit breaker
+   #:circuit-breaker
+   #:make-circuit-breaker
+   #:breaker-name
+   #:breaker-state
+   #:breaker-failure-threshold
+   #:breaker-success-threshold
+   #:breaker-timeout
+   #:breaker-allow-request-p
+   #:breaker-record-success
+   #:breaker-record-failure
+   #:breaker-stats
+   #:breaker-reset
+   #:breaker-force-open
+   #:call-with-circuit-breaker
+   #:with-circuit-breaker
+   #:circuit-open-error
+   #:circuit-open-breaker-name
+
+   ;; Hedged requests
+   #:hedge-policy
+   #:make-hedge-policy
+   #:hedge-max-attempts
+   #:hedge-delay
+   #:hedge-non-fatal-codes
+   #:call-with-hedging
+   #:with-hedging
+   #:call-unary-hedged
+
+   ;; OpenTelemetry / Tracing
+   #:opentelemetry-available-p
+   #:try-load-opentelemetry
+   #:grpc-telemetry-config
+   #:make-telemetry-config
+   #:telemetry-service-name
+   #:telemetry-endpoint
+   #:telemetry-sample-rate
+   #:telemetry-record-request-p
+   #:telemetry-record-response-p
+   #:telemetry-propagate-context-p
+   #:tracing-interceptor
+   #:make-tracing-interceptor
+   #:client-tracing-interceptor
+   #:make-client-tracing-interceptor
+   #:enable-server-tracing
+   #:enable-channel-tracing
+   #:extract-trace-context
+   #:inject-trace-context
+   #:generate-trace-id
+   #:generate-span-id
+
+   ;; gRPC-Web
+   #:+grpc-web-content-type+
+   #:+grpc-web-text-content-type+
+   #:grpc-web-handler
+   #:make-grpc-web-handler
+   #:grpc-web-request-p
+   #:grpc-web-text-request-p
+   #:grpc-web-process-request
+   #:server-enable-grpc-web
+   #:grpc-web-channel
+   #:make-grpc-web-channel
+   #:grpc-web-call-unary
+   #:grpc-web-frame-message
+   #:grpc-web-parse-frame
+   #:grpc-web-encode-trailers
+   #:grpc-web-parse-trailers
+   #:base64-encode
+   #:base64-decode))

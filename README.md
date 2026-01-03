@@ -55,6 +55,11 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 | Channel Pooling | ✅ | — |
 | Wait-for-Ready | ✅ | — |
 | Rich Error Details | ✅ | ✅ |
+| Async/Futures | ✅ | — |
+| Circuit Breaker | ✅ | — |
+| Hedged Requests | ✅ | — |
+| OpenTelemetry | ✅ | ✅ |
+| gRPC-Web | ✅ | ✅ |
 
 ## Features
 
@@ -78,6 +83,11 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 - **Load balancing**: round-robin and pick-first policies with DNS discovery
 - **Channel pooling**: connection reuse and wait-for-ready semantics
 - **Rich error details**: google.rpc.Status with ErrorInfo, RetryInfo, DebugInfo
+- **Async/Futures API**: non-blocking calls with futures, combinators (all, race, any)
+- **Circuit breaker**: fault tolerance pattern for cascade failure prevention
+- **Hedged requests**: send to multiple backends, use first response
+- **OpenTelemetry**: distributed tracing with W3C trace context propagation
+- **gRPC-Web**: browser client support with base64 and binary modes
 - Interoperability tested against Go gRPC servers
 
 ## Installation
@@ -795,6 +805,275 @@ Return structured error information beyond status codes:
     (let ((status (ag-grpc:extract-status-details e)))
       (when status
         (format t "Error: ~A~%" (ag-grpc:rpc-status-message status))))))
+```
+
+## Async/Futures API
+
+Make non-blocking gRPC calls with futures for concurrent operations:
+
+### Basic Async Calls
+
+```lisp
+;; Make an async unary call
+(defvar *future* (ag-grpc:call-unary-async channel method request
+                                            :response-type 'response))
+
+;; Do other work while call is in progress...
+
+;; Block and get result when ready
+(defvar *response* (ag-grpc:future-get *future* :timeout 30))
+```
+
+### Callbacks
+
+```lisp
+;; Use callbacks for fully async processing
+(ag-grpc:call-unary-async channel method request
+                           :response-type 'response
+                           :on-success (lambda (r) (process-response r))
+                           :on-error (lambda (e) (log-error e)))
+
+;; Chain operations with then
+(ag-grpc:future-then future
+                      (lambda (response) (extract-data response))
+                      (lambda (error) (handle-error error)))
+
+;; Error handling with catch
+(ag-grpc:future-catch future
+                       (lambda (e) (recover-from-error e)))
+
+;; Finally - runs regardless of outcome
+(ag-grpc:future-finally future
+                         (lambda () (cleanup-resources)))
+```
+
+### Combinators
+
+```lisp
+;; Wait for all futures to complete
+(defvar *all-results* (ag-grpc:future-get
+                        (ag-grpc:future-all (list future1 future2 future3))))
+
+;; Use first result (race)
+(defvar *fastest* (ag-grpc:future-get
+                    (ag-grpc:future-race (list future1 future2))))
+
+;; Use first successful result
+(defvar *first-success* (ag-grpc:future-get
+                          (ag-grpc:future-any (list future1 future2 future3))))
+```
+
+### Cancellation
+
+```lisp
+;; Cancel a pending call
+(when (ag-grpc:future-pending-p future)
+  (ag-grpc:future-cancel future))
+```
+
+## Circuit Breaker
+
+Prevent cascade failures by detecting repeated errors and temporarily stopping requests:
+
+### Basic Usage
+
+```lisp
+;; Create a circuit breaker
+(defvar *breaker* (ag-grpc:make-circuit-breaker
+                    :name "payment-service"
+                    :failure-threshold 5      ; open after 5 failures
+                    :success-threshold 2      ; close after 2 successes
+                    :timeout 30))             ; try again after 30 seconds
+
+;; Use with RPC calls
+(ag-grpc:with-circuit-breaker (*breaker*)
+  (ag-grpc:call-unary channel method request))
+```
+
+### Circuit States
+
+| State | Behavior |
+|-------|----------|
+| `:closed` | Normal operation, requests pass through |
+| `:open` | Requests fail immediately with `circuit-open-error` |
+| `:half-open` | Limited requests allowed to test recovery |
+
+### Monitoring
+
+```lisp
+;; Get circuit breaker stats
+(multiple-value-bind (state failures successes time-until-retry)
+    (ag-grpc:breaker-stats *breaker*)
+  (format t "State: ~A, Failures: ~A~%" state failures))
+
+;; Manual control
+(ag-grpc:breaker-reset *breaker*)       ; Force close
+(ag-grpc:breaker-force-open *breaker*)  ; Force open
+
+;; State change callbacks
+(defvar *breaker* (ag-grpc:make-circuit-breaker
+                    :on-state-change (lambda (old new)
+                                       (log:warn "Circuit ~A -> ~A" old new))))
+```
+
+## Hedged Requests
+
+Reduce latency by sending the same request to multiple backends:
+
+```lisp
+;; Simple hedged call
+(ag-grpc:call-unary-hedged (list channel1 channel2 channel3)
+                            method request
+                            :response-type 'response
+                            :max-attempts 3   ; use up to 3 channels
+                            :delay 0.1)       ; wait 100ms between hedges
+
+;; With explicit policy
+(defvar *hedge-policy* (ag-grpc:make-hedge-policy
+                         :max-attempts 3
+                         :delay 0.05))  ; 50ms
+
+(ag-grpc:call-with-hedging *hedge-policy*
+                            channels
+                            method request
+                            :response-type 'response)
+
+;; Use with load balancer
+(ag-grpc:call-with-hedging policy balancer method request)
+```
+
+### How Hedging Works
+
+1. Send request to first backend
+2. After `:delay` seconds, if no response, send to second backend
+3. Continue until `:max-attempts` reached or response received
+4. Use first successful response, cancel others
+
+### Non-Fatal Codes
+
+By default, these status codes don't stop hedging:
+- `UNAVAILABLE`
+- `RESOURCE_EXHAUSTED`
+
+## OpenTelemetry Tracing
+
+Integrate with OpenTelemetry for distributed tracing:
+
+### Server-Side Tracing
+
+```lisp
+;; Enable tracing on server
+(ag-grpc:enable-server-tracing server
+                                (ag-grpc:make-telemetry-config
+                                  :service-name "my-grpc-service"
+                                  :sample-rate 1.0))
+```
+
+### Client-Side Tracing
+
+```lisp
+;; Enable tracing on channel
+(ag-grpc:enable-channel-tracing channel
+                                 (ag-grpc:make-telemetry-config
+                                   :service-name "my-grpc-client"))
+```
+
+### Configuration Options
+
+```lisp
+(ag-grpc:make-telemetry-config
+  :service-name "my-service"           ; Service name in traces
+  :endpoint "http://localhost:4318/v1/traces"  ; OTLP endpoint
+  :sample-rate 0.1                     ; Sample 10% of requests
+  :record-request t                    ; Include request data
+  :record-response t                   ; Include response data
+  :propagate-context t)                ; Propagate trace context
+```
+
+### Trace Context Propagation
+
+W3C trace context is automatically propagated in gRPC metadata:
+
+```lisp
+;; Extract trace context from incoming metadata
+(multiple-value-bind (trace-id span-id flags)
+    (ag-grpc:extract-trace-context metadata)
+  (format t "Trace: ~A, Span: ~A~%" trace-id span-id))
+
+;; Inject trace context into outgoing metadata
+(ag-grpc:inject-trace-context metadata trace-id span-id)
+
+;; Generate new IDs
+(defvar *trace-id* (ag-grpc:generate-trace-id))
+(defvar *span-id* (ag-grpc:generate-span-id))
+```
+
+### Dependencies
+
+OpenTelemetry integration uses `cl-opentelemetry` when available:
+
+```lisp
+;; Check availability
+(ag-grpc:opentelemetry-available-p)  ; => T or NIL
+
+;; Attempt to load
+(ag-grpc:try-load-opentelemetry)
+```
+
+## gRPC-Web Support
+
+Enable browser clients to call gRPC services:
+
+### Server-Side Setup
+
+```lisp
+;; Enable gRPC-Web on your server
+(defvar *web-handler* (ag-grpc:server-enable-grpc-web server
+                                                       :allow-origins '("*")))
+
+;; Process gRPC-Web requests from your HTTP server
+(defun handle-grpc-web-request (http-request)
+  (multiple-value-bind (body headers status)
+      (ag-grpc:grpc-web-process-request *web-handler*
+                                         (request-path http-request)
+                                         (request-body http-request)
+                                         (request-content-type http-request)
+                                         (request-headers http-request))
+    (make-http-response :status status :headers headers :body body)))
+```
+
+### Client-Side (Lisp→HTTP)
+
+```lisp
+;; Create a gRPC-Web channel for HTTP/1.1 endpoints
+(defvar *web-channel* (ag-grpc:make-grpc-web-channel "http://api.example.com"
+                                                      :text-mode t))  ; base64
+
+;; Frame a request
+(defvar *frame* (ag-grpc:grpc-web-frame-message serialized-request))
+
+;; Parse response
+(multiple-value-bind (message trailer-p offset)
+    (ag-grpc:grpc-web-parse-frame response-bytes)
+  (if trailer-p
+      (ag-grpc:grpc-web-parse-trailers message)
+      (deserialize message)))
+```
+
+### Content Types
+
+| Content-Type | Format | Use Case |
+|--------------|--------|----------|
+| `application/grpc-web` | Binary | Standard binary frames |
+| `application/grpc-web-text` | Base64 | Text-only transports |
+
+### CORS Configuration
+
+```lisp
+(ag-grpc:make-grpc-web-handler server
+                                :allow-origins '("https://app.example.com")
+                                :expose-headers '("grpc-status" "grpc-message"
+                                                  "x-custom-header"))
 ```
 
 ## TLS/SSL Support
