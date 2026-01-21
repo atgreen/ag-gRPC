@@ -340,10 +340,20 @@ If GRACEFUL is true, wait for active connections to finish."
       ;; Store context for DATA frame handling
       (setf (stream-call-context h2-stream) ctx)
       (setf (stream-handler h2-stream) handler)
-      ;; If END_STREAM is set, this is a unary call with no body
-      ;; (unusual but valid for requests with no data)
-      (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
-        (server-dispatch-handler server conn ctx handler nil)))))
+      ;; For streaming RPCs, dispatch handler immediately so it can read DATA
+      ;; frames via stream-recv. For unary RPCs, wait for END_STREAM.
+      (let ((is-streaming (or (handler-client-streaming-p handler)
+                              (handler-server-streaming-p handler))))
+        (if is-streaming
+            ;; Start streaming handler immediately in main thread
+            ;; (handler's stream-recv will read DATA frames)
+            (handler-case
+                (server-dispatch-handler server conn ctx handler nil)
+              (error (e)
+                (format *error-output* "~&gRPC handler error: ~A~%" e)))
+            ;; Unary: wait for END_STREAM
+            (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
+              (server-dispatch-handler server conn ctx handler nil)))))))
 
 (defun server-handle-data (server conn frame)
   "Handle incoming DATA frame (request body)"
