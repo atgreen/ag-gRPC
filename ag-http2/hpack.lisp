@@ -387,7 +387,7 @@
                         (when (< symbol 256)  ; Not EOS
                           (vector-push-extend symbol result))
                         (setf node tree))))
-    (ag-proto::utf8-to-string result)))
+    (trivial-utf-8:utf-8-bytes-to-string result)))
 
 ;;;; ========================================================================
 ;;;; Dynamic Table
@@ -501,7 +501,7 @@ Handles both string and keyword names."
 
 (defun hpack-encode-string (string output &key huffman)
   "Encode a string (with or without Huffman coding)"
-  (let* ((bytes (ag-proto::string-to-utf8 string))
+  (let* ((bytes (trivial-utf-8:string-to-utf-8-bytes string))
          (len (length bytes)))
     ;; For now, always use literal (no Huffman)
     (hpack-encode-integer len 7 output)
@@ -520,7 +520,7 @@ Handles both string and keyword names."
         (let ((bytes (subseq input new-pos end-pos)))
           (values (if huffman-p
                       (huffman-decode bytes)
-                      (ag-proto::utf8-to-string bytes))
+                      (trivial-utf-8:utf-8-bytes-to-string bytes))
                   end-pos))))))
 
 ;;;; ========================================================================
