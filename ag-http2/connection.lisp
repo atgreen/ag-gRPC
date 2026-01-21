@@ -188,7 +188,10 @@ Reads and validates client preface, exchanges SETTINGS frames."
     (write-frame frame (connection-stream conn))
     (force-output (connection-stream conn))
     (let ((stream (multiplexer-get-stream (connection-multiplexer conn) stream-id)))
-      (stream-transition stream :send-headers)
+      ;; Only transition if stream is idle (server responses on client-initiated
+      ;; streams are already open from receiving client headers)
+      (when (eq (stream-state stream) :idle)
+        (stream-transition stream :send-headers))
       (when end-stream
         (stream-transition stream :send-end-stream)))))
 
@@ -290,16 +293,14 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
        (if end-headers-p
            ;; Complete header block - decode immediately
            (let* ((decoder (connection-hpack-decoder conn))
-                  (header-block (extract-header-block frame)))
-             (format *error-output* "~&  header-block-len=~A first-10: ~{~2,'0X ~}~%"
-                     (length header-block) (coerce (subseq header-block 0 (min 10 (length header-block))) 'list))
-             (let ((headers (hpack-decode decoder header-block)))
-               (stream-transition stream :recv-headers)
-               (if (stream-headers stream)
-                   (setf (stream-trailers stream) headers)
-                   (setf (stream-headers stream) headers))
-               (when end-stream-p
-                 (stream-transition stream :recv-end-stream))))
+                  (header-block (extract-header-block frame))
+                  (headers (hpack-decode decoder header-block)))
+             (stream-transition stream :recv-headers)
+             (if (stream-headers stream)
+                 (setf (stream-trailers stream) headers)
+                 (setf (stream-headers stream) headers))
+             (when end-stream-p
+               (stream-transition stream :recv-end-stream)))
            ;; Incomplete - buffer and wait for CONTINUATION
            (progn
              (setf (connection-pending-header-block conn)
