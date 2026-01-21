@@ -112,7 +112,7 @@
 Returns byte vector with 5-byte header + message."
   (let* ((msg-bytes (if (typep message '(vector (unsigned-byte 8)))
                         message
-                        (babel:string-to-octets message :encoding :utf-8)))
+                        (trivial-utf-8:string-to-utf-8-bytes message)))
          (len (length msg-bytes))
          (frame (make-array (+ 5 len) :element-type '(unsigned-byte 8))))
     ;; Frame flag
@@ -165,7 +165,7 @@ Returns byte vector ready to send."
 (defun grpc-web-parse-trailers (data)
   "Parse trailers from a gRPC-Web trailer frame.
 Returns (values status message metadata)."
-  (let ((text (babel:octets-to-string data :encoding :utf-8))
+  (let ((text (trivial-utf-8:utf-8-bytes-to-string data))
         (status 0)
         (message nil)
         (metadata (make-hash-table :test 'equal)))
