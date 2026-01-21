@@ -190,7 +190,7 @@
   (clingon:make-command
    :name "ag-protoc"
    :version +version+
-   :description "Generate Common Lisp code from Protocol Buffer files"
+   :description (format nil "Generate Common Lisp code from Protocol Buffer files (v~A)" +version+)
    :long-description "ag-protoc compiles .proto files to Common Lisp code.
 
 The generated code includes:

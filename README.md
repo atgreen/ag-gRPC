@@ -74,7 +74,7 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 - **Stream collectors**: `collect-stream-messages`, `map-stream-messages`, `reduce-stream-messages`
 - **Message compression**: gzip compression support (via salza2/chipz)
 - Gray stream integration for composable I/O
-- Optional TLS/SSL support (via cl+ssl)
+- Optional TLS 1.3 support (via pure-tls)
 - **gRPC Server**: handler registration, request context, streaming support
 - **Interceptors**: client and server middleware for logging, auth, metrics
 - **Health checking**: standard grpc.health.v1.Health service
@@ -1076,9 +1076,9 @@ Enable browser clients to call gRPC services:
                                                   "x-custom-header"))
 ```
 
-## TLS/SSL Support
+## TLS Support
 
-ag-gRPC supports optional TLS encryption via [cl+ssl](https://github.com/cl-plus-ssl/cl-plus-ssl).
+ag-gRPC supports optional TLS 1.3 encryption via [pure-tls](https://github.com/atgreen/pure-tls), a pure Common Lisp implementation that requires no external dependencies like OpenSSL.
 
 ### Client TLS
 
@@ -1116,11 +1116,11 @@ openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -node
 
 ### TLS Requirements
 
-TLS support requires cl+ssl and OpenSSL:
+TLS support uses pure-tls, which is a pure Common Lisp implementation requiring no external libraries. Install it via ocicl:
 
-**Linux/macOS:** OpenSSL is typically pre-installed.
-
-**Windows:** Install OpenSSL from [slproweb.com](https://slproweb.com/products/Win32OpenSSL.html) and add the bin directory to your PATH.
+```bash
+ocicl install pure-tls
+```
 
 ### Checking TLS Availability
 
@@ -1132,7 +1132,7 @@ TLS support requires cl+ssl and OpenSSL:
 (ag-http2:try-load-tls)
 ```
 
-If TLS is requested but cl+ssl is not available, an error will be signaled.
+If TLS is requested but pure-tls is not available, an error will be signaled.
 
 ## Systems
 
@@ -1224,7 +1224,7 @@ make interop
 - [salza2](https://github.com/xach/salza2) - Compression library (for gzip)
 
 **Optional:**
-- [cl+ssl](https://github.com/cl-plus-ssl/cl-plus-ssl) - TLS/SSL support (requires OpenSSL)
+- [pure-tls](https://github.com/atgreen/pure-tls) - TLS 1.3 support (pure Common Lisp, no OpenSSL required)
 
 ## Supported Implementations
 
