@@ -38,12 +38,21 @@
                       :initform nil
                       :documentation "When true, require and verify client certificates")
    (interceptors :initform nil :accessor server-interceptors
-                 :documentation "List of server interceptors"))
+                 :documentation "List of server interceptors")
+   (connections-lock :initform (bt:make-lock "connections") :reader server-connections-lock
+                     :documentation "Lock protecting the connections list")
+   (max-connections :initarg :max-connections
+                    :accessor server-max-connections
+                    :initform 128
+                    :documentation "Maximum concurrent connection threads")
+   (connection-semaphore :initform nil :accessor server-connection-semaphore
+                         :documentation "Semaphore limiting concurrent connections"))
   (:documentation "gRPC server"))
 
 (defun make-grpc-server (port &key (host "0.0.0.0") tls tls-certificate tls-key
                                    tls-ca-certificate (tls-verify-client nil)
-                                   (max-concurrent-streams 100))
+                                   (max-concurrent-streams 100)
+                                   (max-connections 128))
   "Create a new gRPC server.
 PORT - Port to listen on
 HOST - Host address to bind to (default \"0.0.0.0\")
@@ -62,7 +71,8 @@ TLS-VERIFY-CLIENT - When true, require and verify client certificates"
                  :tls-key tls-key
                  :tls-ca-certificate tls-ca-certificate
                  :tls-verify-client tls-verify-client
-                 :max-concurrent-streams max-concurrent-streams))
+                 :max-concurrent-streams max-concurrent-streams
+                 :max-connections max-connections))
 
 (defun server-add-interceptor (server interceptor)
   "Add an interceptor to the server's interceptor chain.
@@ -220,6 +230,9 @@ Use server-stop from another thread to shut down."
                                :reuse-address t
                                :element-type '(unsigned-byte 8)))
   (setf (server-state server) :running)
+  (setf (server-connection-semaphore server)
+        (bt:make-semaphore :name "grpc-connections"
+                           :count (server-max-connections server)))
   (unwind-protect
        (server-accept-loop server)
     ;; Cleanup on exit
@@ -238,28 +251,35 @@ If GRACEFUL is true, wait for active connections to finish."
     (usocket:socket-close (server-socket server))
     (setf (server-socket server) nil))
   ;; Close all active connections
-  (dolist (conn (server-connections server))
-    (ignore-errors
-      (ag-http2:connection-close conn)))
-  (setf (server-connections server) nil)
+  (bt:with-lock-held ((server-connections-lock server))
+    (dolist (conn (server-connections server))
+      (ignore-errors
+        (ag-http2:connection-close conn)))
+    (setf (server-connections server) nil))
   (setf (server-state server) :stopped))
 
 (defun server-accept-loop (server)
   "Accept and handle incoming connections"
-  (loop while (eq (server-state server) :running)
-        do (handler-case
-               (let ((client-socket (usocket:socket-accept (server-socket server))))
-                 (when client-socket
-                   (handler-case
-                       (server-handle-connection server client-socket)
-                     (error (e)
-                       (format *error-output* "Connection error: ~A~%" e)
-                       (ignore-errors
-                         (usocket:socket-close client-socket))))))
-             (usocket:socket-error (e)
-               ;; Socket closed during shutdown
-               (declare (ignore e))
-               (return)))))
+  (let ((sem (server-connection-semaphore server)))
+    (loop while (eq (server-state server) :running)
+          do (handler-case
+                 (let ((client-socket (usocket:socket-accept (server-socket server))))
+                   (when client-socket
+                     (bt:wait-on-semaphore sem)
+                     (bt:make-thread
+                      (lambda ()
+                        (unwind-protect
+                             (handler-case
+                                 (server-handle-connection server client-socket)
+                               (error (e)
+                                 (format *error-output* "Connection error: ~A~%" e)
+                                 (ignore-errors (usocket:socket-close client-socket))))
+                          (bt:signal-semaphore sem)))
+                      :name "ag-grpc-conn")))
+               (usocket:socket-error (e)
+                 ;; Socket closed during shutdown
+                 (declare (ignore e))
+                 (return))))))
 
 (defun server-handle-connection (server client-socket)
   "Handle a single client connection"
@@ -275,12 +295,14 @@ If GRACEFUL is true, wait for active connections to finish."
     ;; Perform HTTP/2 handshake
     (ag-http2:server-connection-handshake conn)
     ;; Track connection
-    (push conn (server-connections server))
+    (bt:with-lock-held ((server-connections-lock server))
+      (push conn (server-connections server)))
     (unwind-protect
          (server-connection-loop server conn peer-addr)
       ;; Cleanup
-      (setf (server-connections server)
-            (remove conn (server-connections server)))
+      (bt:with-lock-held ((server-connections-lock server))
+        (setf (server-connections server)
+              (remove conn (server-connections server))))
       (ignore-errors
         (ag-http2:connection-close conn)))))
 
@@ -560,21 +582,19 @@ If GRACEFUL is true, wait for active connections to finish."
                                     :stream-id (context-stream-id ctx)
                                     :request-type request-type
                                     :response-type response-type)))
-        ;; Send response headers
-        (server-send-headers conn ctx)
-        ;; Call handler with stream for both sending and receiving
+        ;; Headers deferred until first stream-send
         (funcall handler-fn ctx stream)
         ;; Send trailers
         (server-send-trailers conn ctx +grpc-status-ok+))
     (grpc-status-error (e)
-      (server-send-error conn (context-stream-id ctx)
-                         (grpc-status-error-code e)
-                         (grpc-status-error-message e))
+      (server-send-trailers conn ctx
+                            (grpc-status-error-code e)
+                            (grpc-status-error-message e))
       (error e))
     (error (e)
-      (server-send-error conn (context-stream-id ctx)
-                         +grpc-status-internal+
-                         (format nil "Internal error: ~A" e))
+      (server-send-trailers conn ctx
+                            +grpc-status-internal+
+                            (format nil "Internal error: ~A" e))
       (error e))))
 
 ;;;; ========================================================================
@@ -591,12 +611,15 @@ If GRACEFUL is true, wait for active connections to finish."
            :code +grpc-status-cancelled+
            :message "Client cancelled the RPC"))
   (let* ((conn (server-stream-connection stream))
+         (ctx (server-stream-context stream))
          (stream-id (server-stream-id stream))
-         (response-encoding (context-response-encoding (server-stream-context stream)))
+         (response-encoding (context-response-encoding ctx))
          (message-bytes (ag-proto:serialize-to-bytes message))
          (frame-data (if (and response-encoding (string-equal response-encoding "gzip"))
                          (encode-grpc-message (compress-grpc-message message-bytes response-encoding) :compressed t)
                          (encode-grpc-message message-bytes))))
+    ;; Send headers if not yet sent
+    (server-send-headers conn ctx)
     (ag-http2:connection-send-data conn stream-id frame-data :end-stream nil))
   stream)
 
@@ -695,10 +718,18 @@ Returns RESULT (default NIL) when no more messages."
   (server-send-trailers conn ctx +grpc-status-ok+))
 
 (defun server-send-trailers (conn ctx status &optional message)
-  "Send trailers with gRPC status"
+  "Send trailers with gRPC status.
+When response headers have not been sent, produces a Trailers-Only response
+by prepending :status 200 and content-type to the trailers (per gRPC spec)."
   (let ((trailers (make-trailers status
                                  :message message
                                  :metadata (context-trailing-metadata ctx))))
+    ;; Trailers-Only: prepend HTTP/2 pseudo-headers and content-type
+    (unless (context-response-headers-sent-p ctx)
+      (setf trailers (append (list (cons :status "200")
+                                   (cons "content-type" *grpc-content-type*))
+                             trailers))
+      (setf (context-response-headers-sent-p ctx) t))
     (ag-http2:connection-send-headers conn (context-stream-id ctx)
                                       trailers :end-stream t)))
 

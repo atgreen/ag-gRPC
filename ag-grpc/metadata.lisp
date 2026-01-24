@@ -248,21 +248,23 @@ Skips pseudo-headers and standard gRPC headers."
 
 (defun make-response-headers (&key metadata encoding)
   "Create standard gRPC response headers.
-ENCODING - Optional compression encoding to advertise (e.g., \"gzip\")."
-  (let ((headers (list (cons :status "200")
-                       (cons "content-type" *grpc-content-type*))))
-    ;; Add grpc-encoding header if using compression
-    (when (and encoding (not (string-equal encoding "identity")))
-      (push (cons "grpc-encoding" encoding) headers))
+ENCODING - Optional compression encoding to advertise (e.g., \"gzip\").
+Pseudo-headers (:status) come first per RFC 9113."
+  ;; Push in reverse priority order so :status ends up first
+  (let ((tail nil))
     (when metadata
       (dolist (entry (metadata-entries metadata))
         (let ((key (car entry))
               (value (cdr entry)))
           ;; Binary metadata keys (ending in -bin) must be base64 encoded
           (if (binary-metadata-key-p key)
-              (push (cons key (encode-binary-metadata value)) headers)
-              (push entry headers)))))
-    headers))
+              (push (cons key (encode-binary-metadata value)) tail)
+              (push entry tail)))))
+    (when (and encoding (not (string-equal encoding "identity")))
+      (push (cons "grpc-encoding" encoding) tail))
+    (push (cons "content-type" *grpc-content-type*) tail)
+    (push (cons :status "200") tail)
+    tail))
 
 (defun make-trailers (status &key message metadata)
   "Create gRPC trailers"
