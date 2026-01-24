@@ -21,6 +21,14 @@
    (tls-verify :initarg :tls-verify :accessor channel-tls-verify
                :initform nil
                :documentation "Verify TLS certificates")
+   (tls-client-certificate :initarg :tls-client-certificate
+                           :accessor channel-tls-client-certificate
+                           :initform nil
+                           :documentation "Path to client certificate for mTLS")
+   (tls-client-key :initarg :tls-client-key
+                   :accessor channel-tls-client-key
+                   :initform nil
+                   :documentation "Path to client private key for mTLS")
    (connection :initarg :connection :accessor channel-connection
                :initform nil
                :documentation "HTTP/2 connection")
@@ -35,32 +43,42 @@
                  :documentation "List of client interceptors"))
   (:documentation "gRPC client channel"))
 
-(defun make-channel (host port &key (connect t) (timeout 30 timeout-supplied-p) metadata tls (tls-verify nil))
+(defun make-channel (host port &key (connect t) (timeout 30 timeout-supplied-p) metadata
+                                      tls (tls-verify nil)
+                                      tls-client-certificate tls-client-key)
   "Create a new gRPC channel to a server.
 If CONNECT is true (default), immediately establish the connection.
 TIMEOUT - Default timeout in seconds. Pass NIL to disable default timeout.
-If TLS is true, use TLS encryption (requires cl+ssl).
-If TLS-VERIFY is true, verify server certificates."
+If TLS is true, use TLS encryption.
+If TLS-VERIFY is true, verify server certificates.
+TLS-CLIENT-CERTIFICATE - Path to client certificate for mTLS.
+TLS-CLIENT-KEY - Path to client private key for mTLS."
   (let ((channel (make-instance 'grpc-channel
                                 :host host
                                 :port port
                                 :tls tls
                                 :tls-verify tls-verify
+                                :tls-client-certificate tls-client-certificate
+                                :tls-client-key tls-client-key
                                 :default-timeout (if timeout-supplied-p timeout 30)
                                 :metadata metadata)))
     (when connect
       (channel-connect channel))
     channel))
 
-(defun make-secure-channel (host port &key (connect t) timeout metadata (verify nil))
+(defun make-secure-channel (host port &key (connect t) timeout metadata (verify nil)
+                                           client-certificate client-key)
   "Create a new gRPC channel with TLS encryption.
-Convenience function equivalent to (make-channel ... :tls t)."
+Convenience function equivalent to (make-channel ... :tls t).
+CLIENT-CERTIFICATE and CLIENT-KEY enable mTLS client authentication."
   (make-channel host port
                 :connect connect
                 :timeout timeout
                 :metadata metadata
                 :tls t
-                :tls-verify verify))
+                :tls-verify verify
+                :tls-client-certificate client-certificate
+                :tls-client-key client-key))
 
 (defun channel-connect (channel)
   "Establish the connection for this channel"
@@ -70,7 +88,9 @@ Convenience function equivalent to (make-channel ... :tls t)."
            (channel-host channel)
            (channel-port channel)
            :tls (channel-tls channel)
-           :verify (channel-tls-verify channel)))))
+           :verify (channel-tls-verify channel)
+           :client-certificate (channel-tls-client-certificate channel)
+           :client-key (channel-tls-client-key channel)))))
 
 (defun channel-connected-p (channel)
   "Return T if the channel has an active connection"

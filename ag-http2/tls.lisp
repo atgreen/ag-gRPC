@@ -32,31 +32,43 @@
 (defvar *make-tls-server-stream* nil
   "Function to create TLS server stream (set when pure-tls is loaded)")
 
-(defun wrap-stream-with-tls (stream hostname &key verify)
+(defun wrap-stream-with-tls (stream hostname &key verify client-certificate client-key)
   "Wrap a socket stream with TLS encryption.
    STREAM is the underlying TCP stream.
    HOSTNAME is used for SNI (Server Name Indication).
-   VERIFY controls certificate verification (T for full verification)."
+   VERIFY controls certificate verification (T for full verification).
+   CLIENT-CERTIFICATE - Path to client certificate for mTLS.
+   CLIENT-KEY - Path to client private key for mTLS."
   (ensure-tls-available)
-  (funcall *make-tls-client-stream* stream
-           :hostname hostname
-           :verify (if verify
-                       (symbol-value (find-symbol "+VERIFY-PEER+" :pure-tls))
-                       (symbol-value (find-symbol "+VERIFY-NONE+" :pure-tls)))
-           :alpn-protocols '("h2")))
+  (apply *make-tls-client-stream* stream
+         :hostname hostname
+         :verify (if verify
+                     (symbol-value (find-symbol "+VERIFY-PEER+" :pure-tls))
+                     (symbol-value (find-symbol "+VERIFY-NONE+" :pure-tls)))
+         :alpn-protocols '("h2")
+         (append
+          (when client-certificate (list :client-certificate client-certificate))
+          (when client-key (list :client-key client-key)))))
 
-(defun wrap-server-stream-with-tls (stream certificate key &key password)
+(defun wrap-server-stream-with-tls (stream certificate key &key password verify trust-store)
   "Wrap a server socket stream with TLS encryption.
 STREAM - the underlying TCP stream
 CERTIFICATE - path to PEM certificate file
 KEY - path to PEM private key file
-PASSWORD - optional password for encrypted key (currently unused by pure-tls)"
+PASSWORD - optional password for encrypted key (currently unused by pure-tls)
+VERIFY - client certificate verification mode (T to require client certs)
+TRUST-STORE - path to CA certificate for verifying client certificates"
   (declare (ignore password))
   (ensure-tls-available)
-  (funcall *make-tls-server-stream* stream
-           :certificate certificate
-           :key key
-           :alpn-protocols '("h2")))
+  (apply *make-tls-server-stream* stream
+         :certificate certificate
+         :key key
+         :alpn-protocols '("h2")
+         (append
+          (when verify
+            (list :verify (symbol-value (find-symbol "+VERIFY-REQUIRED+" :pure-tls))))
+          (when trust-store
+            (list :trust-store trust-store)))))
 
 ;;;; ========================================================================
 ;;;; TLS Initialization

@@ -63,14 +63,19 @@
                                :documentation "END_STREAM flag from initial HEADERS frame"))
   (:documentation "HTTP/2 connection"))
 
-(defun make-client-connection (host port &key tls (verify nil))
+(defun make-client-connection (host port &key tls (verify nil) client-certificate client-key)
   "Create a new HTTP/2 client connection.
    If TLS is true, wrap the connection with TLS encryption.
-   VERIFY controls certificate verification (default nil)."
+   VERIFY controls certificate verification (default nil).
+   CLIENT-CERTIFICATE - Path to client certificate for mTLS.
+   CLIENT-KEY - Path to client private key for mTLS."
   (let* ((socket (usocket:socket-connect host port :element-type '(unsigned-byte 8)))
          (raw-stream (usocket:socket-stream socket))
          (stream (if tls
-                     (wrap-stream-with-tls raw-stream host :verify verify)
+                     (wrap-stream-with-tls raw-stream host
+                                           :verify verify
+                                           :client-certificate client-certificate
+                                           :client-key client-key)
                      raw-stream))
          (conn (make-instance 'http2-connection
                               :socket socket
@@ -81,13 +86,17 @@
     (connection-handshake conn)
     conn))
 
-(defun make-server-connection (socket &key tls certificate key password)
+(defun make-server-connection (socket &key tls certificate key password verify ca-certificate)
   "Create a new HTTP/2 server connection from an accepted socket.
-If TLS is true, wrap the stream with TLS using the provided certificate and key."
+If TLS is true, wrap the stream with TLS using the provided certificate and key.
+VERIFY - When true, require and verify client certificates (mTLS).
+CA-CERTIFICATE - Path to CA certificate for verifying client certificates."
   (let* ((raw-stream (usocket:socket-stream socket))
          (stream (if tls
                      (wrap-server-stream-with-tls raw-stream certificate key
-                                                   :password password)
+                                                   :password password
+                                                   :verify verify
+                                                   :trust-store ca-certificate)
                      raw-stream))
          (conn (make-instance 'http2-connection
                               :socket socket

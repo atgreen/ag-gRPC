@@ -31,18 +31,27 @@
    (tls-key :initarg :tls-key :accessor server-tls-key
             :initform nil
             :documentation "Path to TLS private key file")
+   (tls-ca-certificate :initarg :tls-ca-certificate :accessor server-tls-ca-certificate
+                       :initform nil
+                       :documentation "Path to CA certificate for verifying client certificates (mTLS)")
+   (tls-verify-client :initarg :tls-verify-client :accessor server-tls-verify-client
+                      :initform nil
+                      :documentation "When true, require and verify client certificates")
    (interceptors :initform nil :accessor server-interceptors
                  :documentation "List of server interceptors"))
   (:documentation "gRPC server"))
 
 (defun make-grpc-server (port &key (host "0.0.0.0") tls tls-certificate tls-key
+                                   tls-ca-certificate (tls-verify-client nil)
                                    (max-concurrent-streams 100))
   "Create a new gRPC server.
 PORT - Port to listen on
 HOST - Host address to bind to (default \"0.0.0.0\")
 TLS - Enable TLS encryption
 TLS-CERTIFICATE - Path to TLS certificate file
-TLS-KEY - Path to TLS private key file"
+TLS-KEY - Path to TLS private key file
+TLS-CA-CERTIFICATE - Path to CA certificate for verifying client certificates (mTLS)
+TLS-VERIFY-CLIENT - When true, require and verify client certificates"
   (when (and tls (not (and tls-certificate tls-key)))
     (error "TLS requires both :tls-certificate and :tls-key"))
   (make-instance 'grpc-server
@@ -51,6 +60,8 @@ TLS-KEY - Path to TLS private key file"
                  :tls tls
                  :tls-certificate tls-certificate
                  :tls-key tls-key
+                 :tls-ca-certificate tls-ca-certificate
+                 :tls-verify-client tls-verify-client
                  :max-concurrent-streams max-concurrent-streams))
 
 (defun server-add-interceptor (server interceptor)
@@ -255,7 +266,9 @@ If GRACEFUL is true, wait for active connections to finish."
   (let* ((conn (ag-http2:make-server-connection client-socket
                                                  :tls (server-tls server)
                                                  :certificate (server-tls-certificate server)
-                                                 :key (server-tls-key server)))
+                                                 :key (server-tls-key server)
+                                                 :verify (server-tls-verify-client server)
+                                                 :ca-certificate (server-tls-ca-certificate server)))
          (peer-addr (format nil "~A:~A"
                             (usocket:get-peer-address client-socket)
                             (usocket:get-peer-port client-socket))))
