@@ -18,6 +18,10 @@
 Used to determine if a field type should be serialized as varint (enum) or
 length-delimited (message).")
 
+(defvar *class-prefix* nil
+  "Optional prefix to add to generated class and accessor names.
+For example, setting this to \"PROTO-\" will generate class names like PROTO-FOO-BAR.")
+
 (defun enum-type-p (type-name)
   "Return T if TYPE-NAME refers to a known enum type."
   (and *known-enum-types*
@@ -57,6 +61,12 @@ length-delimited (message).")
                 (write-char (char-upcase char) s))))
     (when suffix
       (write-string suffix s))))
+
+(defun prefixed-lisp-name (name &optional suffix)
+  "Convert a proto name to a prefixed Lisp symbol name using *class-prefix*."
+  (if *class-prefix*
+      (concatenate 'string *class-prefix* (lisp-name name suffix))
+      (lisp-name name suffix)))
 
 ;;; Type mapping
 
@@ -103,20 +113,28 @@ length-delimited (message).")
   "CL symbols that should not be used as accessor names (to avoid package lock violations)")
 
 (defun safe-accessor-name (name package)
-  "Generate a safe accessor name, prefixing if it conflicts with CL symbols"
-  (let ((upname (string-upcase (substitute #\- #\_ name))))
-    (if (member upname *cl-reserved-names* :test #'string=)
-        (intern (concatenate 'string "PROTO-" upname) package)
-        (intern upname package))))
+  "Generate a safe accessor name, prefixing if it conflicts with CL symbols or if *CLASS-PREFIX* is set"
+  (let* ((upname (string-upcase (substitute #\- #\_ name)))
+         (prefix (or *class-prefix*
+                     (when (member upname *cl-reserved-names* :test #'string=)
+                       "PROTO-")))
+         (final-name (if prefix
+                         (concatenate 'string prefix upname)
+                         upname)))
+    (intern final-name package)))
 
 (defun safe-class-name (name package)
-  "Generate a safe class name, prefixing if it conflicts with CL symbols.
+  "Generate a safe class name, prefixing if it conflicts with CL symbols or if *CLASS-PREFIX* is set.
 NAME should already be in LISP-NAME format (e.g., FOO-BAR).
 If PACKAGE is nil, interns in the current package (*PACKAGE*)."
-  (let ((target-package (or package *package*)))
-    (if (member name *cl-reserved-names* :test #'string=)
-        (intern (concatenate 'string "PROTO-" name) target-package)
-        (intern name target-package))))
+  (let* ((target-package (or package *package*))
+         (prefix (or *class-prefix*
+                     (when (member name *cl-reserved-names* :test #'string=)
+                       "PROTO-")))
+         (final-name (if prefix
+                         (concatenate 'string prefix name)
+                         name)))
+    (intern final-name target-package)))
 
 (defun field-name-to-slot-name (name)
   "Convert a field name to a slot name symbol, prefixing with PROTO- if it conflicts with CL"
@@ -577,11 +595,12 @@ Includes top-level enums and nested enums from messages."
         (collect-from-message msg nil)))
     enum-table))
 
-(defun generate-lisp-code (file-desc &key (package *package*) (generate-stubs t) additional-enum-types)
+(defun generate-lisp-code (file-desc &key (package *package*) (generate-stubs t) additional-enum-types class-prefix)
   "Generate Lisp code for all messages in a proto file descriptor.
 Returns a list of forms to be compiled.
 If GENERATE-STUBS is true (default), also generates client stubs for services.
-ADDITIONAL-ENUM-TYPES is a hash table of extra enum type names to include (from imports)."
+ADDITIONAL-ENUM-TYPES is a hash table of extra enum type names to include (from imports).
+CLASS-PREFIX is an optional string to prefix all generated class and accessor names (e.g., \"PROTO-\")."
   ;; Build enum types table for this file, merging with additional types
   (let* ((local-enums (collect-enum-names file-desc))
          (*known-enum-types* (if additional-enum-types
@@ -591,6 +610,7 @@ ADDITIONAL-ENUM-TYPES is a hash table of extra enum type names to include (from 
                                             additional-enum-types)
                                    local-enums)
                                  local-enums))
+         (*class-prefix* class-prefix)
          (messages (proto-file-messages file-desc))
          (enums (proto-file-enums file-desc))
          (services (proto-file-services file-desc))

@@ -71,6 +71,14 @@
    :key :include-paths
    :description "Add directory to proto import search path (can be repeated)"))
 
+(defun make-class-prefix-option ()
+  "Create --class-prefix option for adding prefix to generated classes."
+  (clingon:make-option
+   :string
+   :long-name "class-prefix"
+   :key :class-prefix
+   :description "Prefix to add to all generated class and accessor names (e.g., PROTO-)"))
+
 ;;; -------------------------------------------------------------------------
 ;;; CLI Handler
 ;;; -------------------------------------------------------------------------
@@ -93,7 +101,7 @@
         (merge-pathnames output-name (ensure-directory-pathname output-dir))
         output-name)))
 
-(defun compile-proto-to-lisp (input-file &key output-file package load verbose print include-paths)
+(defun compile-proto-to-lisp (input-file &key output-file package load verbose print include-paths class-prefix)
   "Compile a single .proto file to Lisp."
   (when verbose
     (format *error-output* "; Compiling ~A~%" input-file))
@@ -105,7 +113,8 @@
          ;; Collect enum types from all parsed files (including imports)
          (all-enum-types (ag-proto:get-all-enum-types))
          (forms (ag-proto:generate-lisp-code file-desc :package pkg
-                                              :additional-enum-types all-enum-types)))
+                                              :additional-enum-types all-enum-types
+                                              :class-prefix class-prefix)))
     ;; Write to output file if specified
     (when output-file
       (when verbose
@@ -147,6 +156,7 @@
         (print (clingon:getopt cmd :print))
         (verbose (clingon:getopt cmd :verbose))
         (include-paths (clingon:getopt cmd :include-paths))
+        (class-prefix (clingon:getopt cmd :class-prefix))
         (args (clingon:command-arguments cmd)))
     ;; Validate arguments
     (unless args
@@ -176,7 +186,8 @@
                                    :load load
                                    :verbose verbose
                                    :print print
-                                   :include-paths include-paths)))
+                                   :include-paths include-paths
+                                   :class-prefix class-prefix)))
       (error (e)
         (format *error-output* "Error: ~A~%" e)
         (uiop:quit 1)))))
@@ -213,7 +224,8 @@ Examples:
                   (make-load-option)
                   (make-print-option)
                   (make-verbose-option)
-                  (make-include-path-option))
+                  (make-include-path-option)
+                  (make-class-prefix-option))
    :handler #'handle-cli))
 
 ;;; -------------------------------------------------------------------------
