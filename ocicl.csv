@@ -41,7 +41,7 @@ iolib.base, ghcr.io/ocicl/iolib@sha256:953f1cb142e647da50562d51eca562afc2c5b941b
 iolib.common-lisp, ghcr.io/ocicl/iolib@sha256:953f1cb142e647da50562d51eca562afc2c5b941b89ae622332b53c7dbed7e1b, iolib-20240503-396cc43/iolib.common-lisp.asd
 iolib.conf, ghcr.io/ocicl/iolib@sha256:953f1cb142e647da50562d51eca562afc2c5b941b89ae622332b53c7dbed7e1b, iolib-20240503-396cc43/iolib.conf.asd
 iolib.examples, ghcr.io/ocicl/iolib@sha256:953f1cb142e647da50562d51eca562afc2c5b941b89ae622332b53c7dbed7e1b, iolib-20240503-396cc43/iolib.examples.asd
-iparse, ghcr.io/ocicl/iparse@sha256:1ac10c00c6d772219421c3f1a93ab726e90a1e1ff7dc44b518acb7d6376ff4bb, cl-iparse-20260101-8d830fa/iparse.asd
+iparse, ghcr.io/ocicl/iparse@sha256:be2a8ac08fbc16dbb7e6a00354091f488aeaeadb66f42cb8e5a8fdb0ccb175e9, cl-iparse-20260129-639dc46/iparse.asd
 ironclad, ghcr.io/ocicl/ironclad@sha256:3117e5a26a3e94924074c3548c235a2b733609ed61a2731880ac9e31df55428b, ironclad-20240503-6da010f/ironclad.asd
 ironclad-text, ghcr.io/ocicl/ironclad@sha256:3117e5a26a3e94924074c3548c235a2b733609ed61a2731880ac9e31df55428b, ironclad-20240503-6da010f/ironclad-text.asd
 mgl-pax, ghcr.io/ocicl/mgl-pax-bootstrap@sha256:2adeaafc448ed8fd7fbe59459d57da7499625a00b8af92cacca5adfcb94509db, mgl-pax-20251221-c1c1edb/mgl-pax.asd

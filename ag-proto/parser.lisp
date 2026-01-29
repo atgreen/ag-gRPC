@@ -143,6 +143,18 @@
 ;;;; AST Transformation
 ;;;; ========================================================================
 
+(defun unwrap (obj)
+  "Unwrap iparse metaobjects, recursively unwrapping nested structures."
+  (cond
+    ;; If it's a metaobject, unwrap it and recursively process
+    ((iparse/util:metaobject-p obj)
+     (unwrap (iparse/util:unwrap-meta obj)))
+    ;; If it's a list, recursively unwrap each element
+    ((consp obj)
+     (mapcar #'unwrap obj))
+    ;; Otherwise return as-is
+    (t obj)))
+
 (defun transform-proto-ast (ast)
   "Transform the raw parse tree into proto descriptor objects"
   (when (null ast)
@@ -506,7 +518,7 @@ Also adds the oneof's fields to the message with oneof-index set."
 Returns a proto-file-descriptor."
   (multiple-value-bind (ast success-p) (proto3-parser string)
     (if success-p
-        (transform-proto-ast ast)
+        (transform-proto-ast (unwrap ast))
         (error 'proto-parse-error :message "Failed to parse proto3 content"))))
 
 (defvar *include-paths* nil
