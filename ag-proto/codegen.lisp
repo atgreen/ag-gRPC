@@ -701,7 +701,7 @@ Returns the list of generated forms."
          (stub-class (intern (lisp-name service-name "-STUB") package))
          (fn-name (intern (lisp-name (format nil "~A-~A" service-name method-name)) package))
          (output-type (proto-method-output-type method-desc))
-         (response-class (intern (string-upcase output-type) package))
+         (response-class (safe-class-name (lisp-name output-type) package))
          ;; Build the method path: /package.Service/Method
          (method-path (if (and proto-package (plusp (length proto-package)))
                           (format nil "/~A.~A/~A" proto-package service-name method-name)
