@@ -33,9 +33,9 @@ message TestMsg {
   string text = 1;
   int32 num = 2;
 }")
-  (let* ((original (make-instance 'testmsg :text "Hello" :num 42))
+  (let* ((original (make-instance 'test-msg :text "Hello" :num 42))
          (bytes (ag-proto:serialize-to-bytes original))
-         (restored (ag-proto:deserialize-from-bytes 'testmsg bytes)))
+         (restored (ag-proto:deserialize-from-bytes 'test-msg bytes)))
     (is (string= "Hello" (text restored)))
     (is (= 42 (num restored)))))
 
@@ -60,7 +60,7 @@ message AllScalars {
   string s = 14;
   bytes by = 15;
 }")
-  (let* ((original (make-instance 'allscalars
+  (let* ((original (make-instance 'all-scalars
                                   :d 3.14159d0
                                   :f 2.718f0
                                   :i32 -100
@@ -77,7 +77,7 @@ message AllScalars {
                                   :s "test string"
                                   :by #(1 2 3 4 5)))
          (bytes (ag-proto:serialize-to-bytes original))
-         (restored (ag-proto:deserialize-from-bytes 'allscalars bytes)))
+         (restored (ag-proto:deserialize-from-bytes 'all-scalars bytes)))
     ;; Check floats with tolerance
     (is (< (abs (- (d restored) 3.14159d0)) 1d-10))
     (is (< (abs (- (f restored) 2.718f0)) 1f-5))
