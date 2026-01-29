@@ -10,12 +10,11 @@
 ;;;; - 4 bytes: Message length (big-endian)
 ;;;; - N bytes: Message data
 ;;;;
-;;;; COMPRESSION STATUS:
-;;;; This implementation does NOT currently support message compression.
-;;;; The grpc-encoding header is set to "identity" (no compression).
-;;;; If a peer sends a compressed message (compressed flag = 1), an error
-;;;; is signaled. To add compression support, implement decompress-grpc-message
-;;;; and compress-grpc-message for gzip/deflate algorithms.
+;;;; COMPRESSION SUPPORT:
+;;;; This implementation supports gzip and deflate compression via chipz
+;;;; (decompression) and salza2 (compression). The grpc-encoding header can
+;;;; be set to "gzip", "deflate", or "identity" (no compression). Compressed
+;;;; messages are automatically decompressed when the compressed flag is set.
 ;;;;
 ;;;; Reference: https://grpc.io/docs/what-is-grpc/core-concepts/#length-prefixed-message-framing
 ;;;; ========================================================================
