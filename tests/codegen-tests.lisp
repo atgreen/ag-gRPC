@@ -75,7 +75,8 @@ message AllScalars {
                                   :sf64 -123456789012
                                   :b t
                                   :s "test string"
-                                  :by #(1 2 3 4 5)))
+                                  :by (make-array 5 :element-type '(unsigned-byte 8)
+                                                    :initial-contents #(1 2 3 4 5))))
          (bytes (ag-proto:serialize-to-bytes original))
          (restored (ag-proto:deserialize-from-bytes 'all-scalars bytes)))
     ;; Check floats with tolerance
