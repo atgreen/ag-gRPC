@@ -9,6 +9,7 @@
   :depends-on (#:usocket #:trivial-utf-8)
   :pathname "ag-http2"
   :components ((:file "package")
+               (:file "constants")
                (:file "hpack")
                (:file "frames")
                (:file "streams")

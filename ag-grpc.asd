@@ -10,6 +10,7 @@
                #:chipz #:salza2)
   :pathname "ag-grpc"
   :components ((:file "package")
+               (:file "constants")
                (:file "status")
                (:file "framing")
                (:file "metadata")
