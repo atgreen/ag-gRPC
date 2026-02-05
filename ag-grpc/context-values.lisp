@@ -10,16 +10,16 @@
 ;;;; call stack via cl-context:*current-context*.
 ;;;; ========================================================================
 
-(cl-context:define-context-key +grpc-request-id+
+(define-context-key +grpc-request-id+
   "Unique request ID for tracing")
 
-(cl-context:define-context-key +grpc-trace-context+
+(define-context-key +grpc-trace-context+
   "Distributed tracing context (trace-id, span-id)")
 
-(cl-context:define-context-key +grpc-auth-token+
+(define-context-key +grpc-auth-token+
   "Authentication token from metadata")
 
-(cl-context:define-context-key +grpc-peer-address+
+(define-context-key +grpc-peer-address+
   "Remote peer address")
 
 ;;;; ========================================================================

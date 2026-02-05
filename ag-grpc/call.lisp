@@ -889,7 +889,7 @@ When the stream ends, also sets stream-status."
         (unless (and status-header (string= (cdr status-header) "200"))
           (setf (stream-status bidi-stream) +grpc-status-unknown+)
           (setf (bidi-stream-recv-finished-p bidi-stream) t)
-          (return-from stream-read-message-internal-internal nil))))
+          (return-from stream-read-message-internal nil))))
     ;; Get response encoding for decompression
     (let ((encoding (get-response-encoding (call-response-headers call))))
       ;; Try to decode a message from the buffer first
