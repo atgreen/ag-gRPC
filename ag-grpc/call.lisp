@@ -72,6 +72,21 @@ Returns the encoding string (e.g., \"gzip\") or NIL if not present/identity."
         (unless (string-equal encoding "identity")
           encoding)))))
 
+(defun finalize-client-stream (stream)
+  "Clean up stream and cancel its context.
+Safe to call multiple times (idempotent).
+
+Idempotency contract:
+- Check cancel-fn is non-nil before calling
+- Clear cancel-fn to nil after calling
+- Subsequent calls are no-ops"
+  (let ((cancel-fn (stream-cancel-fn stream)))
+    (when cancel-fn
+      ;; Call cancel function
+      (funcall cancel-fn)
+      ;; Clear to prevent double-cancel (CRITICAL)
+      (setf (stream-cancel-fn stream) nil))))
+
 ;;;; ========================================================================
 ;;;; gRPC Call Object
 ;;;; ========================================================================
@@ -123,38 +138,62 @@ The response is available via (call-response call)."
                               :request-metadata metadata))
          ;; Use provided timeout, fall back to channel default
          (effective-timeout (or timeout (channel-default-timeout channel))))
-    ;; Send request headers (includes grpc-timeout for server-side enforcement)
-    (channel-send-headers channel stream-id method
-                          :metadata metadata
-                          :timeout effective-timeout)
-    ;; Send request message with END_STREAM
-    (let ((request-bytes (if (typep request 'vector)
-                             request
-                             (ag-proto:serialize-to-bytes request))))
-      (channel-send-message channel stream-id request-bytes :end-stream t))
-    ;; Wrap blocking receive operations with client-side timeout enforcement
-    (flet ((do-receive ()
-             ;; Receive response headers
-             (let ((raw-headers (channel-receive-headers channel stream-id)))
-               (setf (call-response-headers call) raw-headers))
-             ;; Process headers and receive body/trailers (rest of the call)
-             (call-unary-process-response channel call stream-id response-type)))
-      (handler-case
-          (if effective-timeout
-              (bt2:with-timeout (effective-timeout)
-                (do-receive))
-              (do-receive))
-        (bt2:timeout ()
-          ;; Client-side deadline exceeded - cancel the stream
-          (channel-cancel-stream channel stream-id)
-          (setf (call-status call) +grpc-status-deadline-exceeded+)
-          (setf (call-status-message call) "Deadline exceeded")
-          (error 'grpc-status-error
-                 :code (call-status call)
-                 :message (call-status-message call)
-                 :headers (call-response-headers call)
-                 :trailers nil))))
-    call))
+    ;; Create cl-context for this call
+    (multiple-value-bind (ctx cancel-fn)
+        (if effective-timeout
+            (cl-context:with-timeout (cl-context:ensure-context) effective-timeout)
+            (values (cl-context:ensure-context) nil))
+      (unwind-protect
+           (progn
+             ;; Send request headers (includes grpc-timeout for server-side enforcement)
+             (channel-send-headers channel stream-id method
+                                   :metadata metadata
+                                   :timeout effective-timeout)
+             ;; Send request message with END_STREAM
+             (let ((request-bytes (if (typep request 'vector)
+                                      request
+                                      (ag-proto:serialize-to-bytes request))))
+               (channel-send-message channel stream-id request-bytes :end-stream t))
+             ;; Wrap blocking receive operations with layered timeout enforcement
+             (flet ((do-receive ()
+                      ;; Receive response headers
+                      (let ((raw-headers (channel-receive-headers channel stream-id)))
+                        (setf (call-response-headers call) raw-headers))
+                      ;; Process headers and receive body/trailers (rest of the call)
+                      (call-unary-process-response channel call stream-id response-type)))
+               ;; Bind context and wrap with bt2:with-timeout for hard deadline
+               (cl-context:with-context (ctx ctx)
+                 (handler-case
+                     (if effective-timeout
+                         ;; bt2:with-timeout provides preemptive interruption
+                         (bt2:with-timeout (effective-timeout)
+                           (do-receive))
+                         (do-receive))
+                   ;; Map both deadline mechanisms to DEADLINE_EXCEEDED
+                   ((or bt2:timeout cl-context:context-deadline-exceeded) (c)
+                     (channel-cancel-stream channel stream-id)
+                     (setf (call-status call) +grpc-status-deadline-exceeded+)
+                     (setf (call-status-message call) "Deadline exceeded")
+                     (error 'grpc-status-error
+                            :code +grpc-status-deadline-exceeded+
+                            :message "Deadline exceeded"
+                            :headers (call-response-headers call)
+                            :trailers nil
+                            :cause c))
+                   ;; Handle explicit cancellation
+                   (cl-context:context-cancelled (c)
+                     (channel-cancel-stream channel stream-id)
+                     (setf (call-status call) +grpc-status-cancelled+)
+                     (setf (call-status-message call) "Cancelled")
+                     (error 'grpc-status-error
+                            :code +grpc-status-cancelled+
+                            :message "Cancelled"
+                            :headers (call-response-headers call)
+                            :trailers nil
+                            :cause c)))))
+             call)
+        ;; Always clean up context
+        (when cancel-fn (funcall cancel-fn))))))
 
 (defun call-unary-process-response (channel call stream-id response-type)
   "Process the response after headers are received.
