@@ -34,7 +34,9 @@
    (trailers :initform nil :accessor stream-trailers
              :documentation "Received trailers")
    (rst-stream-error :initform nil :accessor stream-rst-stream-error
-                     :documentation "RST_STREAM error code if received"))
+                     :documentation "RST_STREAM error code if received")
+   (cleanup-callback :initform nil :accessor stream-cleanup-callback
+                     :documentation "Optional callback invoked when stream closes"))
   (:documentation "Represents an HTTP/2 stream"))
 
 (defun make-http2-stream (id &key (initial-window-size 65535))

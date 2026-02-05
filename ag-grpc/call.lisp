@@ -221,6 +221,16 @@ Validates headers, receives body and trailers, extracts status."
   ((channel :initarg :channel :accessor stream-call-channel)
    (stream-id :initarg :stream-id :accessor stream-call-stream-id)
    (method :initarg :method :accessor stream-call-method)
+
+   ;; cl-context integration
+   (cl-context :initarg :cl-context
+               :accessor stream-cl-context
+               :documentation "Context for cancellation/deadlines")
+   (cancel-fn :initarg :cancel-fn
+              :accessor stream-cancel-fn
+              :initform nil
+              :documentation "Cancel function for cleanup")
+
    (response-headers :initform nil :accessor stream-call-response-headers)
    (response-trailers :initform nil :accessor stream-call-response-trailers)
    (status :initform nil :accessor stream-call-status)
@@ -409,6 +419,16 @@ Example: (make-method-path \"helloworld.Greeter\" \"SayHello\")
             :documentation "The gRPC channel")
    (stream-id :initarg :stream-id :accessor client-stream-id
               :documentation "HTTP/2 stream ID")
+
+   ;; cl-context integration
+   (cl-context :initarg :cl-context
+               :accessor stream-cl-context
+               :documentation "Context for cancellation/deadlines")
+   (cancel-fn :initarg :cancel-fn
+              :accessor stream-cancel-fn
+              :initform nil
+              :documentation "Cancel function for cleanup")
+
    (response-type :initarg :response-type :accessor client-stream-response-type
                   :initform nil
                   :documentation "Response type for deserialization")
@@ -569,6 +589,16 @@ Example:
             :documentation "The gRPC channel")
    (stream-id :initarg :stream-id :accessor bidi-stream-id
               :documentation "HTTP/2 stream ID")
+
+   ;; cl-context integration
+   (cl-context :initarg :cl-context
+               :accessor stream-cl-context
+               :documentation "Context for cancellation/deadlines")
+   (cancel-fn :initarg :cancel-fn
+              :accessor stream-cancel-fn
+              :initform nil
+              :documentation "Cancel function for cleanup")
+
    (response-type :initarg :response-type :accessor bidi-stream-response-type
                   :initform nil
                   :documentation "Response type for deserialization")

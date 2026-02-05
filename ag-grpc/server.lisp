@@ -142,10 +142,26 @@ SERVER-STREAMING - T if server sends multiple messages"
                      :documentation "Decoded request metadata")
    (peer-address :initarg :peer-address :reader context-peer-address
                  :documentation "Client address (host:port)")
+
+   ;; cl-context integration
+   (cl-context :initarg :cl-context
+               :accessor context-cl-context
+               :initform (cl-context:background)
+               :documentation "Context for cancellation/deadlines")
+   (cancel-fn :initarg :cancel-fn
+              :accessor context-cancel-fn
+              :initform nil
+              :documentation "Cancel function to clean up context")
+
+   ;; Keep existing fields for backward compatibility
    (deadline :initform nil :accessor context-deadline
-             :documentation "Request deadline")
+             :documentation "Absolute deadline (seconds, rational)")
+   (deadline-synced-p :initform nil :accessor context-deadline-synced-p
+                      :documentation "T if deadline cached from cl-context")
    (cancelled-p :initform nil :accessor context-cancelled-p
-                :documentation "T if request was cancelled")
+                :documentation "Cached cancellation state")
+
+   ;; Response state (mutable)
    (response-headers-sent-p :initform nil :accessor context-response-headers-sent-p
                             :documentation "T if response headers were sent")
    (response-metadata :initform nil :accessor context-response-metadata
@@ -176,18 +192,83 @@ SERVER-STREAMING - T if server sends multiple messages"
   "Set trailing metadata to be sent with trailers"
   (setf (context-trailing-metadata ctx) metadata))
 
+;; Sync deadline from cl-context on first access
+(defmethod context-deadline :around ((ctx grpc-call-context))
+  "Sync deadline from cl-context on first access"
+  (unless (context-deadline-synced-p ctx)
+    (let ((ctx-deadline (cl-context:deadline (context-cl-context ctx))))
+      (when ctx-deadline
+        (setf (slot-value ctx 'deadline) ctx-deadline)))
+    (setf (context-deadline-synced-p ctx) t))
+  (call-next-method))
+
 (defun context-check-cancelled (ctx)
-  "Check if the client has cancelled this RPC.
-Updates and returns context-cancelled-p. Handlers can call this periodically
-during long operations to detect client cancellation early."
+  "Check if cancelled via RST_STREAM or cl-context.
+  Updates and returns context-cancelled-p. Never signals.
+
+  Pure predicate: uses done-p + err, not check-context (avoids side effects).
+  For signaling behavior, use context-ensure-not-cancelled."
   (unless (context-cancelled-p ctx)
+    ;; Check HTTP/2 RST_STREAM
     (let* ((stream-id (context-stream-id ctx))
            (h2-stream (ag-http2:multiplexer-get-stream
                        (ag-http2:connection-multiplexer (context-connection ctx))
                        stream-id)))
       (when (and h2-stream (ag-http2:stream-rst-stream-error h2-stream))
-        (setf (context-cancelled-p ctx) t))))
+        (setf (context-cancelled-p ctx) t)))
+
+    ;; Check cl-context cancellation (use done-p, not check-context)
+    (when (cl-context:done-p (context-cl-context ctx))
+      (setf (context-cancelled-p ctx) t)))
+
   (context-cancelled-p ctx))
+
+(defun context-ensure-not-cancelled (ctx)
+  "Check if cancelled and signal grpc-status-error if so.
+  Use this when you want to propagate cancellation as an error.
+
+  Uses check-context (may have side effects like logging).
+  For polling behavior, use context-check-cancelled.
+
+  Cancellation precedence:
+  1. Deadline exceeded takes precedence (deterministic, time-based)
+  2. RST_STREAM second (client-initiated cancellation)
+  This ensures deadline errors are reported even if RST_STREAM also present."
+
+  ;; First check deadline (highest precedence)
+  (let ((cl-ctx (context-cl-context ctx)))
+    (when (cl-context:done-p cl-ctx)
+      (let ((err (cl-context:err cl-ctx)))
+        (when (typep err 'cl-context:context-deadline-exceeded)
+          (error 'grpc-status-error
+                 :code +grpc-status-deadline-exceeded+
+                 :message (format nil "~A" err)
+                 :headers (context-request-headers ctx)
+                 :trailers nil
+                 :cause err)))))
+
+  ;; Then check RST_STREAM (second precedence)
+  (let* ((stream-id (context-stream-id ctx))
+         (h2-stream (ag-http2:multiplexer-get-stream
+                     (ag-http2:connection-multiplexer (context-connection ctx))
+                     stream-id)))
+    (when (and h2-stream (ag-http2:stream-rst-stream-error h2-stream))
+      (error 'grpc-status-error
+             :code +grpc-status-cancelled+
+             :message "Cancelled by client (RST_STREAM)"
+             :headers (context-request-headers ctx)
+             :trailers nil)))
+
+  ;; Finally check other cl-context cancellation
+  (handler-case
+      (cl-context:check-context cl-ctx)
+    (cl-context:context-cancelled (e)
+      (error 'grpc-status-error
+             :code +grpc-status-cancelled+
+             :message (format nil "~A" e)
+             :headers (context-request-headers ctx)
+             :trailers nil
+             :cause e))))
 
 ;;;; ========================================================================
 ;;;; Server Call Stream (for streaming RPCs)
