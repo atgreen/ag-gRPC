@@ -431,19 +431,27 @@ If GRACEFUL is true, wait for active connections to finish."
       (server-send-error conn stream-id +grpc-status-unimplemented+
                          (format nil "Method not found: ~A" method-path))
       (return-from server-handle-headers))
-    ;; Create call context
-    (let ((ctx (make-instance 'grpc-call-context
-                              :connection conn
-                              :stream-id stream-id
-                              :method method-path
-                              :headers headers
-                              :peer-address peer-addr)))
-      ;; Parse timeout if present
-      (let ((timeout-header (cdr (assoc "grpc-timeout" headers :test #'string-equal))))
-        (when timeout-header
-          (setf (context-deadline ctx)
-                (+ (get-universal-time) (parse-grpc-timeout timeout-header)))))
-      ;; Extract compression encoding from client request
+    ;; Parse timeout and create cl-context with deadline
+    (let ((timeout-header (cdr (assoc "grpc-timeout" headers :test #'string-equal))))
+      (multiple-value-bind (call-ctx cancel-fn)
+          (if timeout-header
+              (let* ((timeout-seconds (parse-grpc-timeout timeout-header))
+                     (deadline (+ (grpc-current-time) timeout-seconds)))
+                (cl-context:with-deadline (cl-context:ensure-context) deadline))
+              (values (cl-context:ensure-context) nil))
+        ;; Create call context with cl-context
+        (let ((ctx (make-instance 'grpc-call-context
+                                  :connection conn
+                                  :stream-id stream-id
+                                  :method method-path
+                                  :headers headers
+                                  :peer-address peer-addr
+                                  :cl-context call-ctx
+                                  :cancel-fn cancel-fn)))
+          ;; Enrich context with request-scoped values from headers
+          (setf (slot-value ctx 'cl-context)
+                (enrich-context-from-metadata call-ctx headers peer-addr))
+          ;; Extract compression encoding from client request
       (let ((request-encoding (cdr (assoc "grpc-encoding" headers :test #'string-equal))))
         (when (and request-encoding (not (string-equal request-encoding "identity")))
           (setf (context-request-encoding ctx) request-encoding)))
@@ -456,6 +464,15 @@ If GRACEFUL is true, wait for active connections to finish."
       ;; Store context for DATA frame handling
       (setf (stream-call-context h2-stream) ctx)
       (setf (stream-handler h2-stream) handler)
+      ;; Register cleanup callback on HTTP/2 stream
+      (setf (ag-http2:stream-cleanup-callback h2-stream)
+            (lambda (stream)
+              (declare (ignore stream))
+              ;; Idempotent cleanup - check before calling
+              (let ((fn (context-cancel-fn ctx)))
+                (when fn
+                  (funcall fn)
+                  (setf (context-cancel-fn ctx) nil)))))
       ;; For streaming RPCs, dispatch handler immediately so it can read DATA
       ;; frames via stream-recv. For unary RPCs, wait for END_STREAM.
       (let ((is-streaming (or (handler-client-streaming-p handler)
@@ -469,7 +486,7 @@ If GRACEFUL is true, wait for active connections to finish."
                 (format *error-output* "~&gRPC handler error: ~A~%" e)))
             ;; Unary: wait for END_STREAM
             (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
-              (server-dispatch-handler server conn ctx handler nil)))))))
+              (server-dispatch-handler server conn ctx handler nil)))))))))
 
 (defun server-handle-data (server conn frame)
   "Handle incoming DATA frame (request body)"
@@ -497,40 +514,43 @@ If GRACEFUL is true, wait for active connections to finish."
 
 (defun server-dispatch-handler (server conn ctx handler request-data)
   "Dispatch to the appropriate handler based on streaming type"
-  (let* ((client-streaming (handler-client-streaming-p handler))
-         (server-streaming (handler-server-streaming-p handler))
-         (handler-type (cond
-                         ((and (not client-streaming) (not server-streaming)) :unary)
-                         ((and (not client-streaming) server-streaming) :server-streaming)
-                         ((and client-streaming (not server-streaming)) :client-streaming)
-                         (t :bidi-streaming)))
-         (interceptors (server-interceptors server))
-         (handler-info (list :method-path (context-method-path ctx)
-                             :handler-type handler-type))
-         (call-contexts nil)
-         (response nil)
-         (error-occurred nil))
-    ;; Run pre-handler interceptors
-    (when interceptors
-      (setf call-contexts (run-interceptors-call-start interceptors ctx handler-info)))
-    ;; Dispatch to handler
-    (handler-case
-        (setf response
-              (case handler-type
-                (:unary
-                 (server-handle-unary conn ctx handler request-data interceptors))
-                (:server-streaming
-                 (server-handle-server-streaming conn ctx handler request-data interceptors))
-                (:client-streaming
-                 (server-handle-client-streaming conn ctx handler request-data interceptors))
-                (:bidi-streaming
-                 (server-handle-bidi-streaming conn ctx handler request-data interceptors))))
-      (error (e)
-        (setf error-occurred e)))
-    ;; Run post-handler interceptors
-    (when interceptors
-      (run-interceptors-call-end interceptors ctx handler-info
-                                  call-contexts response error-occurred))))
+  ;; Bind *current-context* from grpc-call-context for handler execution
+  (let ((call-ctx (context-cl-context ctx)))
+    (cl-context:with-context (call-ctx call-ctx)
+      (let* ((client-streaming (handler-client-streaming-p handler))
+             (server-streaming (handler-server-streaming-p handler))
+             (handler-type (cond
+                             ((and (not client-streaming) (not server-streaming)) :unary)
+                             ((and (not client-streaming) server-streaming) :server-streaming)
+                             ((and client-streaming (not server-streaming)) :client-streaming)
+                             (t :bidi-streaming)))
+             (interceptors (server-interceptors server))
+             (handler-info (list :method-path (context-method-path ctx)
+                                 :handler-type handler-type))
+             (call-contexts nil)
+             (response nil)
+             (error-occurred nil))
+        ;; Run pre-handler interceptors
+        (when interceptors
+          (setf call-contexts (run-interceptors-call-start interceptors ctx handler-info)))
+        ;; Dispatch to handler
+        (handler-case
+            (setf response
+                  (case handler-type
+                    (:unary
+                     (server-handle-unary conn ctx handler request-data interceptors))
+                    (:server-streaming
+                     (server-handle-server-streaming conn ctx handler request-data interceptors))
+                    (:client-streaming
+                     (server-handle-client-streaming conn ctx handler request-data interceptors))
+                    (:bidi-streaming
+                     (server-handle-bidi-streaming conn ctx handler request-data interceptors))))
+          (error (e)
+            (setf error-occurred e)))
+        ;; Run post-handler interceptors
+        (when interceptors
+          (run-interceptors-call-end interceptors ctx handler-info
+                                      call-contexts response error-occurred))))))
 
 ;;;; ========================================================================
 ;;;; Unary RPC Handler
