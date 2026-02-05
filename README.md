@@ -1351,6 +1351,7 @@ make interop
 - [ieee-floats](https://github.com/marijnh/ieee-floats) - IEEE 754 float encoding
 - [trivial-gray-streams](https://github.com/trivial-gray-streams/trivial-gray-streams) - Gray stream support
 - [bordeaux-threads](https://github.com/sionescu/bordeaux-threads) - Portable threading (for timeouts)
+- [cl-context](https://github.com/green/cl-context) - Context propagation for cancellation and deadlines
 - [iparse](https://github.com/atgreen/iparse) - Parser combinator library
 - [clingon](https://github.com/dnaeon/clingon) - CLI framework (for ag-protoc)
 - [version-string](https://github.com/atgreen/cl-version-string) - Version string generation
