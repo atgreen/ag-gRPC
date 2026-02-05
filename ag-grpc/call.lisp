@@ -3,6 +3,62 @@
 (in-package #:ag-grpc)
 
 ;;;; ========================================================================
+;;;; Stream Timeout Wrapper Macro (MUST be defined early for compile order)
+;;;; ========================================================================
+
+(defmacro with-stream-timeout ((stream) &body body)
+  "Execute BODY with timeout enforcement from STREAM's context.
+
+Three-branch pattern:
+1. Positive remaining → bt2:with-timeout with double-float coercion
+2. Zero/negative remaining → check-context for immediate DEADLINE_EXCEEDED
+3. No deadline → cooperative checking only
+
+Maps DEADLINE exceptions only (timeout-related):
+- bt2:timeout → grpc-status-error with DEADLINE_EXCEEDED
+- cl-context:context-deadline-exceeded → grpc-status-error with DEADLINE_EXCEEDED
+
+Does NOT map cancellation exceptions:
+- cl-context:context-cancelled is handled by higher-level code
+
+Preserves original condition in :cause slot (grpc-status-error-cause) for debugging."
+  (let ((ctx-var (gensym "CTX"))
+        (deadline-var (gensym "DEADLINE"))
+        (remaining-var (gensym "REMAINING")))
+    `(let ((,ctx-var (stream-cl-context ,stream)))
+       (cl-context:with-context (,ctx-var ,ctx-var)
+         (let* ((,deadline-var (cl-context:deadline ,ctx-var))
+                (,remaining-var (when ,deadline-var
+                                  (- ,deadline-var (cl-context:get-current-time)))))
+           (cond
+             ((and ,remaining-var (> ,remaining-var 0))
+              (handler-case
+                  (bt2:with-timeout ((coerce ,remaining-var 'double-float))
+                    ,@body)
+                (bt2:timeout (c)
+                  (error 'grpc-status-error
+                         :code +grpc-status-deadline-exceeded+
+                         :message "Deadline exceeded"
+                         :cause c))
+                (cl-context:context-deadline-exceeded (c)
+                  (error 'grpc-status-error
+                         :code +grpc-status-deadline-exceeded+
+                         :message (format nil "Deadline exceeded: ~A" c)
+                         :cause c))))
+             (,deadline-var
+              (handler-case
+                  (progn
+                    (cl-context:check-context ,ctx-var)
+                    ,@body)
+                (cl-context:context-deadline-exceeded (c)
+                  (error 'grpc-status-error
+                         :code +grpc-status-deadline-exceeded+
+                         :message (format nil "Deadline exceeded: ~A" c)
+                         :cause c))))
+             (t
+              ,@body)))))))
+
+;;;; ========================================================================
 ;;;; Helper Functions
 ;;;; ========================================================================
 
