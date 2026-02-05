@@ -216,7 +216,9 @@ Skips pseudo-headers and standard gRPC headers."
 
 (defun make-request-headers (method &key timeout metadata authority tls)
   "Create standard gRPC request headers.
-   If TLS is true, use https scheme."
+
+  TIMEOUT - Timeout in seconds (rational), or NIL to omit header.
+  If TLS is true, use https scheme."
   ;; Check if metadata overrides grpc-encoding
   (let* ((custom-encoding (and metadata
                                (metadata-get metadata "grpc-encoding")))
@@ -229,10 +231,12 @@ Skips pseudo-headers and standard gRPC headers."
                        (cons "user-agent" *grpc-user-agent*)
                        (cons "grpc-encoding" (or custom-encoding *grpc-encoding*))
                        (cons "grpc-accept-encoding" *grpc-accept-encoding*))))
-    ;; Pseudo-headers must appear before regular headers, so only append extras.
-    (when timeout
-      (setf headers (append headers
-                            (list (cons "grpc-timeout" (format-grpc-timeout timeout))))))
+    ;; Only add grpc-timeout if timeout is non-NIL and positive (uses spec-compliant formatter)
+    (when (and timeout (> timeout 0))
+      (let ((formatted-timeout (format-grpc-timeout-spec-compliant timeout)))
+        (when formatted-timeout
+          (setf headers (append headers
+                                (list (cons "grpc-timeout" formatted-timeout)))))))
     (when metadata
       (dolist (entry (metadata-entries metadata))
         (let ((key (car entry))
@@ -285,9 +289,74 @@ Pseudo-headers (:status) come first per RFC 9113."
 ;;;; Timeout Handling
 ;;;; ========================================================================
 
+(defun grpc-current-time ()
+  "Get current time in seconds (rational) compatible with cl-context.
+
+  Returns fractional seconds since epoch, using cl-context's time base
+  for consistency with deadline tracking."
+  (cl-context:get-current-time))
+
+(defun deadline-to-grpc-timeout (deadline)
+  "Convert absolute deadline to relative timeout in seconds.
+
+  Returns NIL if deadline already passed or is NIL.
+  DEADLINE should be in the same time base as grpc-current-time."
+  (when deadline
+    (let ((remaining (- deadline (grpc-current-time))))
+      (when (> remaining 0)
+        remaining))))
+
+(defun format-grpc-timeout-spec-compliant (seconds)
+  "Format timeout for grpc-timeout header per gRPC spec.
+
+  Enforces 8-digit maximum and chooses appropriate unit.
+  Spec: timeout = 1*8DIGIT TimeoutUnit
+  TimeoutUnit = \"H\" / \"M\" / \"S\" / \"m\" / \"u\" / \"n\"
+
+  Returns NIL if seconds is NIL or non-positive."
+  (when (and seconds (> seconds 0))
+    (cond
+      ;; Hours (if >= 360000 seconds = 100 hours)
+      ((>= seconds 360000)
+       (let ((hours (min 99999999 (floor seconds 3600))))
+         (format nil "~DH" hours)))
+      ;; Minutes (if >= 6000 seconds = 100 minutes)
+      ((>= seconds 6000)
+       (let ((minutes (min 99999999 (floor seconds 60))))
+         (format nil "~DM" minutes)))
+      ;; Seconds (if >= 1 second)
+      ((>= seconds 1)
+       (let ((secs (min 99999999 (floor seconds))))
+         (format nil "~DS" secs)))
+      ;; Milliseconds (if >= 0.001 seconds)
+      ((>= seconds 0.001)
+       (let ((millis (min 99999999 (floor (* seconds 1000)))))
+         (format nil "~Dm" millis)))
+      ;; Microseconds (if >= 0.000001 seconds)
+      ((>= seconds 0.000001)
+       (let ((micros (min 99999999 (floor (* seconds 1000000)))))
+         (format nil "~Du" micros)))
+      ;; Nanoseconds (minimum precision)
+      (t
+       (let ((nanos (min 99999999 (floor (* seconds 1000000000)))))
+         (format nil "~Dn" nanos))))))
+
+(defparameter *warn-deprecated-timeout-formatter* nil
+  "When T, emit deprecation warnings for format-grpc-timeout.
+  Set to T in development, NIL in production/tests to avoid noise.")
+
 (defun format-grpc-timeout (seconds)
   "Format a timeout value for the grpc-timeout header.
-Timeout is specified in seconds."
+
+  DEPRECATED: Use format-grpc-timeout-spec-compliant for spec compliance.
+  This function may emit non-compliant headers for large timeouts.
+
+  Note: Deprecation warnings are controlled by *warn-deprecated-timeout-formatter*.
+  Set it to T to see warnings during development.
+
+  Timeout is specified in seconds."
+  (when *warn-deprecated-timeout-formatter*
+    (warn "format-grpc-timeout is deprecated. Use format-grpc-timeout-spec-compliant."))
   (cond
     ((< seconds 1)
      (format nil "~Dm" (round (* seconds 1000))))  ; milliseconds

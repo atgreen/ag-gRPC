@@ -44,6 +44,7 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 | Metadata | ✅ | ✅ |
 | Deadlines/Timeouts | ✅ | ✅ |
 | Cancellation | ✅ | ✅ |
+| Context (cl-context) | ✅ | ✅ |
 | Interceptors | ✅ | ✅ |
 | Health Checking | — | ✅ |
 | Reflection | — | ✅ |
@@ -76,6 +77,7 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 - Gray stream integration for composable I/O
 - Optional TLS 1.3 support (via pure-tls)
 - **gRPC Server**: handler registration, request context, streaming support
+- **cl-context integration**: cooperative cancellation, deadline enforcement, request-scoped values
 - **Interceptors**: client and server middleware for logging, auth, metrics
 - **Health checking**: standard grpc.health.v1.Health service
 - **Server reflection**: grpc.reflection.v1alpha for service discovery
@@ -530,6 +532,138 @@ Server handlers can detect when clients cancel RPCs:
              ;; Do work
              (perform-step i)))
   (make-response))
+```
+
+## Timeouts, Deadlines, and Context
+
+ag-gRPC integrates with [cl-context](https://github.com/green/cl-context) for cooperative cancellation, deadline enforcement, and request-scoped values.
+
+### How Timeout Parameters Work
+
+When you pass a `:timeout` parameter to a call function:
+
+```lisp
+;; Timeout creates a cl-context with deadline internally
+(ag-grpc:call-unary channel "/service/Method" request
+                    :timeout 5.0)  ; 5 second deadline
+```
+
+**What happens:**
+1. Creates a `cl-context` with a deadline (current-time + timeout)
+2. Sends `grpc-timeout` header to the server
+3. Uses **layered timeout enforcement**:
+   - `bt2:with-timeout` for preemptive interruption (hard deadline)
+   - `cl-context` for cooperative cancellation (graceful checks)
+4. Maps both timeout mechanisms to `DEADLINE_EXCEEDED` status
+
+### Timeout Parameter vs. Parent Context
+
+The `:timeout` parameter **composes** with parent contexts:
+
+```lisp
+;; Parent context with 10 second deadline
+(cl-context:with-timeout (cl-context:background) 10.0
+  ;; Child inherits parent deadline (whichever is sooner)
+  (ag-grpc:call-unary channel "/service/Method" request
+                      :timeout 5.0))   ; Uses 5s (shorter)
+
+;; No explicit timeout - inherits parent's deadline
+(cl-context:with-timeout (cl-context:background) 10.0
+  (ag-grpc:call-unary channel "/service/Method" request))  ; Uses 10s
+```
+
+**Deadline precedence:** The sooner of (parent deadline, timeout parameter) is used.
+
+### Request-Scoped Values
+
+ag-gRPC defines standard context keys for request-scoped values:
+
+```lisp
+;; Server-side: values are automatically populated from headers
+(defun handle-request (request ctx)
+  ;; Access request-scoped values
+  (let ((request-id (ag-grpc:grpc-context-value ag-grpc:+grpc-request-id+))
+        (peer (ag-grpc:grpc-context-value ag-grpc:+grpc-peer-address+))
+        (trace-id (ag-grpc:grpc-context-value ag-grpc:+grpc-trace-context+))
+        (auth (ag-grpc:grpc-context-value ag-grpc:+grpc-auth-token+)))
+    (log-request request-id peer trace-id)
+    (make-response)))
+```
+
+**Available context keys:**
+- `+grpc-request-id+` - Unique request identifier
+- `+grpc-peer-address+` - Remote client address
+- `+grpc-trace-context+` - Distributed trace ID (from `x-trace-id` header)
+- `+grpc-auth-token+` - Authorization token (from `authorization` header)
+
+### Cooperative Cancellation
+
+Use `cl-context:check-context` for cooperative cancellation in long operations:
+
+```lisp
+(defun process-batch (items ctx)
+  (loop for item in items
+        do (progn
+             ;; Check for cancellation (deadline or explicit cancel)
+             (cl-context:check-context)
+             ;; Do work
+             (process-item item))))
+```
+
+**Client-side cancellation:**
+
+```lisp
+;; Create cancellable context
+(multiple-value-bind (ctx cancel-fn)
+    (cl-context:with-cancel (cl-context:background))
+
+  ;; Start operation in background
+  (bt2:make-thread
+   (lambda ()
+     (cl-context:with-context (ctx ctx)
+       (ag-grpc:call-unary channel "/service/LongOperation" request))))
+
+  ;; Cancel after user input
+  (when (user-pressed-cancel-p)
+    (funcall cancel-fn)))
+```
+
+### Context Lifetime
+
+**Client-side:**
+- Context created at call start
+- Lives for entire RPC duration (including streaming)
+- Cleaned up automatically when call completes
+
+**Server-side:**
+- Context created when request headers received
+- Enriched with request-scoped values
+- Bound via `*current-context*` for entire handler execution
+- Interceptors access context implicitly
+- Cleaned up when stream closes
+
+### Error Mapping
+
+ag-gRPC maps timeout/cancellation conditions to gRPC status codes:
+
+| Condition | gRPC Status | When |
+|-----------|-------------|------|
+| `bt2:timeout` | `DEADLINE_EXCEEDED` | Hard timeout reached |
+| `cl-context:context-deadline-exceeded` | `DEADLINE_EXCEEDED` | Cooperative deadline check |
+| `cl-context:context-cancelled` | `CANCELLED` | Explicit cancellation |
+| RST_STREAM (error 8) | `CANCELLED` | Network-level cancel |
+
+**Precedence:** Deadline > RST_STREAM > Other cancellation
+
+All errors preserve the original condition in the `:cause` slot:
+
+```lisp
+(handler-case
+    (ag-grpc:call-unary channel "/service/Method" request :timeout 1.0)
+  (ag-grpc:grpc-status-error (e)
+    (format t "Status: ~A~%" (ag-grpc:grpc-status-error-code e))
+    (format t "Message: ~A~%" (ag-grpc:grpc-status-error-message e))
+    (format t "Caused by: ~A~%" (ag-grpc:grpc-status-error-cause e))))
 ```
 
 ## Interceptors (Middleware)

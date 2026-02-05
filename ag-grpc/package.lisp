@@ -2,6 +2,23 @@
 
 (defpackage #:ag-grpc
   (:use #:cl)
+  ;; Import cl-context symbols for use
+  (:import-from #:cl-context
+                #:*current-context*
+                #:check-context
+                #:with-context
+                #:with-timeout
+                #:with-deadline
+                #:with-cancel
+                #:with-value
+                #:done-p
+                #:err
+                #:deadline
+                #:get-current-time
+                #:ensure-context
+                #:define-context-key
+                #:context-cancelled
+                #:context-deadline-exceeded)
   (:export
    ;; Version
    #:+version+
@@ -138,6 +155,7 @@
    #:grpc-status-error-details
    #:grpc-status-error-headers
    #:grpc-status-error-trailers
+   #:grpc-status-error-cause
 
    ;; Server
    #:grpc-server
@@ -155,8 +173,16 @@
    #:context-deadline
    #:context-cancelled-p
    #:context-check-cancelled
+   #:context-ensure-not-cancelled
    #:context-set-response-metadata
    #:context-set-trailing-metadata
+
+   ;; Context values (cl-context integration)
+   #:grpc-context-value
+   #:+grpc-request-id+
+   #:+grpc-trace-context+
+   #:+grpc-auth-token+
+   #:+grpc-peer-address+
 
    ;; Server streams
    #:grpc-server-call-stream

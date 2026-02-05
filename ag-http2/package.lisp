@@ -100,6 +100,7 @@
    #:stream-trailers
    #:stream-data-buffer
    #:stream-rst-stream-error
+   #:stream-cleanup-callback
    #:stream-can-send-p
    #:stream-can-recv-p
    #:stream-consume-data
@@ -107,6 +108,8 @@
    ;; Multiplexer
    #:multiplexer-get-stream
    #:multiplexer-new-stream
+   #:multiplexer-streams
+   #:multiplexer-close-stream
 
    ;; TLS
    #:tls-available-p

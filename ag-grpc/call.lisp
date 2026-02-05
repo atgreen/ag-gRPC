@@ -3,6 +3,62 @@
 (in-package #:ag-grpc)
 
 ;;;; ========================================================================
+;;;; Stream Timeout Wrapper Macro (MUST be defined early for compile order)
+;;;; ========================================================================
+
+(defmacro with-stream-timeout ((stream) &body body)
+  "Execute BODY with timeout enforcement from STREAM's context.
+
+Three-branch pattern:
+1. Positive remaining → bt2:with-timeout with double-float coercion
+2. Zero/negative remaining → check-context for immediate DEADLINE_EXCEEDED
+3. No deadline → cooperative checking only
+
+Maps DEADLINE exceptions only (timeout-related):
+- bt2:timeout → grpc-status-error with DEADLINE_EXCEEDED
+- cl-context:context-deadline-exceeded → grpc-status-error with DEADLINE_EXCEEDED
+
+Does NOT map cancellation exceptions:
+- cl-context:context-cancelled is handled by higher-level code
+
+Preserves original condition in :cause slot (grpc-status-error-cause) for debugging."
+  (let ((ctx-var (gensym "CTX"))
+        (deadline-var (gensym "DEADLINE"))
+        (remaining-var (gensym "REMAINING")))
+    `(let ((,ctx-var (stream-cl-context ,stream)))
+       (cl-context:with-context (,ctx-var ,ctx-var)
+         (let* ((,deadline-var (cl-context:deadline ,ctx-var))
+                (,remaining-var (when ,deadline-var
+                                  (- ,deadline-var (cl-context:get-current-time)))))
+           (cond
+             ((and ,remaining-var (> ,remaining-var 0))
+              (handler-case
+                  (bt2:with-timeout ((coerce ,remaining-var 'double-float))
+                    ,@body)
+                (bt2:timeout (c)
+                  (error 'grpc-status-error
+                         :code +grpc-status-deadline-exceeded+
+                         :message "Deadline exceeded"
+                         :cause c))
+                (cl-context:context-deadline-exceeded (c)
+                  (error 'grpc-status-error
+                         :code +grpc-status-deadline-exceeded+
+                         :message (format nil "Deadline exceeded: ~A" c)
+                         :cause c))))
+             (,deadline-var
+              (handler-case
+                  (progn
+                    (cl-context:check-context ,ctx-var)
+                    ,@body)
+                (cl-context:context-deadline-exceeded (c)
+                  (error 'grpc-status-error
+                         :code +grpc-status-deadline-exceeded+
+                         :message (format nil "Deadline exceeded: ~A" c)
+                         :cause c))))
+             (t
+              ,@body)))))))
+
+;;;; ========================================================================
 ;;;; Helper Functions
 ;;;; ========================================================================
 
@@ -15,6 +71,21 @@ Returns the encoding string (e.g., \"gzip\") or NIL if not present/identity."
         ;; "identity" means no compression, treat as nil
         (unless (string-equal encoding "identity")
           encoding)))))
+
+(defun finalize-client-stream (stream)
+  "Clean up stream and cancel its context.
+Safe to call multiple times (idempotent).
+
+Idempotency contract:
+- Check cancel-fn is non-nil before calling
+- Clear cancel-fn to nil after calling
+- Subsequent calls are no-ops"
+  (let ((cancel-fn (stream-cancel-fn stream)))
+    (when cancel-fn
+      ;; Call cancel function
+      (funcall cancel-fn)
+      ;; Clear to prevent double-cancel (CRITICAL)
+      (setf (stream-cancel-fn stream) nil))))
 
 ;;;; ========================================================================
 ;;;; gRPC Call Object
@@ -67,38 +138,62 @@ The response is available via (call-response call)."
                               :request-metadata metadata))
          ;; Use provided timeout, fall back to channel default
          (effective-timeout (or timeout (channel-default-timeout channel))))
-    ;; Send request headers (includes grpc-timeout for server-side enforcement)
-    (channel-send-headers channel stream-id method
-                          :metadata metadata
-                          :timeout effective-timeout)
-    ;; Send request message with END_STREAM
-    (let ((request-bytes (if (typep request 'vector)
-                             request
-                             (ag-proto:serialize-to-bytes request))))
-      (channel-send-message channel stream-id request-bytes :end-stream t))
-    ;; Wrap blocking receive operations with client-side timeout enforcement
-    (flet ((do-receive ()
-             ;; Receive response headers
-             (let ((raw-headers (channel-receive-headers channel stream-id)))
-               (setf (call-response-headers call) raw-headers))
-             ;; Process headers and receive body/trailers (rest of the call)
-             (call-unary-process-response channel call stream-id response-type)))
-      (handler-case
-          (if effective-timeout
-              (bt2:with-timeout (effective-timeout)
-                (do-receive))
-              (do-receive))
-        (bt2:timeout ()
-          ;; Client-side deadline exceeded - cancel the stream
-          (channel-cancel-stream channel stream-id)
-          (setf (call-status call) +grpc-status-deadline-exceeded+)
-          (setf (call-status-message call) "Deadline exceeded")
-          (error 'grpc-status-error
-                 :code (call-status call)
-                 :message (call-status-message call)
-                 :headers (call-response-headers call)
-                 :trailers nil))))
-    call))
+    ;; Create cl-context for this call
+    (multiple-value-bind (ctx cancel-fn)
+        (if effective-timeout
+            (cl-context:with-timeout (cl-context:ensure-context) effective-timeout)
+            (values (cl-context:ensure-context) nil))
+      (unwind-protect
+           (progn
+             ;; Send request headers (includes grpc-timeout for server-side enforcement)
+             (channel-send-headers channel stream-id method
+                                   :metadata metadata
+                                   :timeout effective-timeout)
+             ;; Send request message with END_STREAM
+             (let ((request-bytes (if (typep request 'vector)
+                                      request
+                                      (ag-proto:serialize-to-bytes request))))
+               (channel-send-message channel stream-id request-bytes :end-stream t))
+             ;; Wrap blocking receive operations with layered timeout enforcement
+             (flet ((do-receive ()
+                      ;; Receive response headers
+                      (let ((raw-headers (channel-receive-headers channel stream-id)))
+                        (setf (call-response-headers call) raw-headers))
+                      ;; Process headers and receive body/trailers (rest of the call)
+                      (call-unary-process-response channel call stream-id response-type)))
+               ;; Bind context and wrap with bt2:with-timeout for hard deadline
+               (cl-context:with-context (ctx ctx)
+                 (handler-case
+                     (if effective-timeout
+                         ;; bt2:with-timeout provides preemptive interruption
+                         (bt2:with-timeout (effective-timeout)
+                           (do-receive))
+                         (do-receive))
+                   ;; Map both deadline mechanisms to DEADLINE_EXCEEDED
+                   ((or bt2:timeout cl-context:context-deadline-exceeded) (c)
+                     (channel-cancel-stream channel stream-id)
+                     (setf (call-status call) +grpc-status-deadline-exceeded+)
+                     (setf (call-status-message call) "Deadline exceeded")
+                     (error 'grpc-status-error
+                            :code +grpc-status-deadline-exceeded+
+                            :message "Deadline exceeded"
+                            :headers (call-response-headers call)
+                            :trailers nil
+                            :cause c))
+                   ;; Handle explicit cancellation
+                   (cl-context:context-cancelled (c)
+                     (channel-cancel-stream channel stream-id)
+                     (setf (call-status call) +grpc-status-cancelled+)
+                     (setf (call-status-message call) "Cancelled")
+                     (error 'grpc-status-error
+                            :code +grpc-status-cancelled+
+                            :message "Cancelled"
+                            :headers (call-response-headers call)
+                            :trailers nil
+                            :cause c)))))
+             call)
+        ;; Always clean up context
+        (when cancel-fn (funcall cancel-fn))))))
 
 (defun call-unary-process-response (channel call stream-id response-type)
   "Process the response after headers are received.
@@ -221,6 +316,16 @@ Validates headers, receives body and trailers, extracts status."
   ((channel :initarg :channel :accessor stream-call-channel)
    (stream-id :initarg :stream-id :accessor stream-call-stream-id)
    (method :initarg :method :accessor stream-call-method)
+
+   ;; cl-context integration
+   (cl-context :initarg :cl-context
+               :accessor stream-cl-context
+               :documentation "Context for cancellation/deadlines")
+   (cancel-fn :initarg :cancel-fn
+              :accessor stream-cancel-fn
+              :initform nil
+              :documentation "Cancel function for cleanup")
+
    (response-headers :initform nil :accessor stream-call-response-headers)
    (response-trailers :initform nil :accessor stream-call-response-trailers)
    (status :initform nil :accessor stream-call-status)
@@ -241,27 +346,48 @@ RESPONSE-TYPE - Optional response type symbol for deserialization
 
 Returns a grpc-server-stream object. Use stream-receive-message to get responses."
   (ensure-connected channel)
-  (let* ((stream (channel-new-stream channel))
-         (stream-id (ag-http2:stream-id stream))
-         (effective-timeout (or timeout (channel-default-timeout channel)))
-         (server-stream (make-instance 'grpc-server-stream
-                                        :channel channel
-                                        :stream-id stream-id
-                                        :method method
-                                        :response-type response-type)))
-    ;; Send request headers
-    (channel-send-headers channel stream-id method
-                          :metadata metadata
-                          :timeout effective-timeout)
-    ;; Send request message with END_STREAM (single request for server streaming)
-    (let ((request-bytes (if (typep request 'vector)
-                             request
-                             (ag-proto:serialize-to-bytes request))))
-      (channel-send-message channel stream-id request-bytes :end-stream t))
-    server-stream))
+  (let* ((h2-stream (channel-new-stream channel))
+         (stream-id (ag-http2:stream-id h2-stream))
+         (effective-timeout (or timeout (channel-default-timeout channel))))
+    ;; Create cl-context for this stream
+    (multiple-value-bind (ctx cancel-fn)
+        (if effective-timeout
+            (cl-context:with-timeout (cl-context:ensure-context) effective-timeout)
+            (values (cl-context:ensure-context) nil))
+      (let ((server-stream (make-instance 'grpc-server-stream
+                                          :channel channel
+                                          :stream-id stream-id
+                                          :method method
+                                          :response-type response-type
+                                          :cl-context ctx
+                                          :cancel-fn cancel-fn)))
+        ;; Register cleanup callback on HTTP/2 stream
+        (setf (ag-http2:stream-cleanup-callback h2-stream)
+              (lambda (stream)
+                (declare (ignore stream))
+                ;; Idempotent cleanup - check before calling
+                (let ((fn (stream-cancel-fn server-stream)))
+                  (when fn
+                    (funcall fn)
+                    (setf (stream-cancel-fn server-stream) nil)))))
+        ;; Send request headers
+        (channel-send-headers channel stream-id method
+                              :metadata metadata
+                              :timeout effective-timeout)
+        ;; Send request message with END_STREAM (single request for server streaming)
+        (let ((request-bytes (if (typep request 'vector)
+                                 request
+                                 (ag-proto:serialize-to-bytes request))))
+          (channel-send-message channel stream-id request-bytes :end-stream t))
+        server-stream))))
 
 (defun stream-receive-headers (server-stream)
-  "Receive and return response headers. Called automatically by stream-receive-message."
+  "Receive and return response headers with timeout enforcement."
+  (with-stream-timeout (server-stream)
+    (stream-receive-headers-internal server-stream)))
+
+(defun stream-receive-headers-internal (server-stream)
+  "Internal implementation - context already bound."
   (unless (stream-headers-received-p server-stream)
     (let* ((channel (stream-call-channel server-stream))
            (stream-id (stream-call-stream-id server-stream))
@@ -285,12 +411,17 @@ Returns a grpc-server-stream object. Use stream-receive-message to get responses
   (stream-call-response-headers server-stream))
 
 (defun stream-receive-message (server-stream)
-  "Receive the next message from a server stream.
+  "Receive the next message from a server stream with timeout enforcement.
 Returns the deserialized message, or NIL when the stream is exhausted.
 After NIL is returned, use stream-call-status to check the final status."
+  (with-stream-timeout (server-stream)
+    (stream-receive-message-internal server-stream)))
+
+(defun stream-receive-message-internal (server-stream)
+  "Internal implementation - context already bound."
   (when (stream-finished-p server-stream)
-    (return-from stream-receive-message nil))
-  ;; Ensure headers are received first
+    (return-from stream-receive-message-internal nil))
+  ;; Ensure headers are received first (also wrapped with timeout)
   (stream-receive-headers server-stream)
   (let* ((channel (stream-call-channel server-stream))
          (stream-id (stream-call-stream-id server-stream))
@@ -303,13 +434,20 @@ After NIL is returned, use stream-call-status to check the final status."
           (if response-type
               (ag-proto:deserialize-from-bytes response-type response-data)
               response-data)
-          ;; No more messages - receive trailers and extract status
+          ;; No more messages - receive trailers, extract status, and clean up
           (progn
             (stream-finish server-stream)
+            ;; Cleanup trigger: stream exhausted
+            (finalize-client-stream server-stream)
             nil)))))
 
 (defun stream-finish (server-stream)
-  "Finish the stream by receiving trailers and extracting status."
+  "Finish the stream by receiving trailers with timeout enforcement."
+  (with-stream-timeout (server-stream)
+    (stream-finish-internal server-stream)))
+
+(defun stream-finish-internal (server-stream)
+  "Internal implementation - context already bound."
   (unless (stream-finished-p server-stream)
     (let* ((channel (stream-call-channel server-stream))
            (stream-id (stream-call-stream-id server-stream)))
@@ -409,6 +547,16 @@ Example: (make-method-path \"helloworld.Greeter\" \"SayHello\")
             :documentation "The gRPC channel")
    (stream-id :initarg :stream-id :accessor client-stream-id
               :documentation "HTTP/2 stream ID")
+
+   ;; cl-context integration
+   (cl-context :initarg :cl-context
+               :accessor stream-cl-context
+               :documentation "Context for cancellation/deadlines")
+   (cancel-fn :initarg :cancel-fn
+              :accessor stream-cancel-fn
+              :initform nil
+              :documentation "Cancel function for cleanup")
+
    (response-type :initarg :response-type :accessor client-stream-response-type
                   :initform nil
                   :documentation "Response type for deserialization")
@@ -427,29 +575,54 @@ RESPONSE-TYPE - Response type symbol for deserialization
 Returns a grpc-client-stream object. Use stream-send to send messages,
 then stream-close-and-recv to finish and get the response."
   (ensure-connected channel)
-  (let* ((stream (channel-new-stream channel))
-         (stream-id (ag-http2:stream-id stream))
+  (let* ((h2-stream (channel-new-stream channel))
+         (stream-id (ag-http2:stream-id h2-stream))
+         (effective-timeout (or timeout (channel-default-timeout channel)))
          (call (make-instance 'grpc-call
                               :channel channel
                               :method method
                               :stream-id stream-id
                               :request-metadata metadata)))
-    ;; Send request headers (NOT end-stream, we're going to send data)
-    (channel-send-headers channel stream-id method
-                          :metadata metadata
-                          :timeout timeout
-                          :end-stream nil)
-    ;; Return the client stream object
-    (make-instance 'grpc-client-stream
-                   :call call
-                   :channel channel
-                   :stream-id stream-id
-                   :response-type response-type)))
+    ;; Create cl-context for this stream
+    (multiple-value-bind (ctx cancel-fn)
+        (if effective-timeout
+            (cl-context:with-timeout (cl-context:ensure-context) effective-timeout)
+            (values (cl-context:ensure-context) nil))
+      (let ((client-stream (make-instance 'grpc-client-stream
+                                          :call call
+                                          :channel channel
+                                          :stream-id stream-id
+                                          :response-type response-type
+                                          :cl-context ctx
+                                          :cancel-fn cancel-fn)))
+        ;; Register cleanup callback on HTTP/2 stream
+        (setf (ag-http2:stream-cleanup-callback h2-stream)
+              (lambda (stream)
+                (declare (ignore stream))
+                ;; Idempotent cleanup - check before calling
+                (let ((fn (stream-cancel-fn client-stream)))
+                  (when fn
+                    (funcall fn)
+                    (setf (stream-cancel-fn client-stream) nil)))))
+        ;; Send request headers (NOT end-stream, we're going to send data)
+        (channel-send-headers channel stream-id method
+                              :metadata metadata
+                              :timeout effective-timeout
+                              :end-stream nil)
+        ;; Return the client stream object
+        client-stream))))
 
 (defgeneric stream-send (stream message)
   (:documentation "Send a message on a streaming RPC.
 MESSAGE can be a proto-message or a byte vector.
 Returns the stream for chaining."))
+
+(defmethod stream-send :around ((stream t) message)
+  "Wrap all stream-send methods with context binding.
+No timeout needed - send operations are non-blocking."
+  (let ((ctx (stream-cl-context stream)))
+    (cl-context:with-context (ctx ctx)
+      (call-next-method))))
 
 (defmethod stream-send ((client-stream grpc-client-stream) message)
   "Send a message on a client stream."
@@ -465,9 +638,17 @@ Returns the stream for chaining."))
   client-stream)
 
 (defun stream-close-and-recv (client-stream)
-  "Close the client stream and receive the server's response.
+  "Close the client stream and receive the server's response with timeout enforcement.
 Signals END_STREAM to the server, then waits for the response.
 Returns (values response status) where response is the deserialized message."
+  (unwind-protect
+       (with-stream-timeout (client-stream)
+         (stream-close-and-recv-internal client-stream))
+    ;; Clean up context when done (idempotent)
+    (finalize-client-stream client-stream)))
+
+(defun stream-close-and-recv-internal (client-stream)
+  "Internal implementation - context already bound."
   (when (client-stream-closed-p client-stream)
     (error "Client stream already closed"))
   (setf (client-stream-closed-p client-stream) t)
@@ -486,7 +667,7 @@ Returns (values response status) where response is the deserialized message."
     (let ((status-header (assoc :status (call-response-headers call))))
       (unless (and status-header (string= (cdr status-header) "200"))
         (setf (call-status call) +grpc-status-unknown+)
-        (return-from stream-close-and-recv
+        (return-from stream-close-and-recv-internal
           (values nil (call-status call)))))
     ;; Get response encoding for decompression
     (let* ((encoding (get-response-encoding (call-response-headers call)))
@@ -569,6 +750,16 @@ Example:
             :documentation "The gRPC channel")
    (stream-id :initarg :stream-id :accessor bidi-stream-id
               :documentation "HTTP/2 stream ID")
+
+   ;; cl-context integration
+   (cl-context :initarg :cl-context
+               :accessor stream-cl-context
+               :documentation "Context for cancellation/deadlines")
+   (cancel-fn :initarg :cancel-fn
+              :accessor stream-cancel-fn
+              :initform nil
+              :documentation "Cancel function for cleanup")
+
    (response-type :initarg :response-type :accessor bidi-stream-response-type
                   :initform nil
                   :documentation "Response type for deserialization")
@@ -595,24 +786,42 @@ RESPONSE-TYPE - Response type symbol for deserialization
 Returns a grpc-bidi-stream object. Use stream-send to send messages,
 stream-read-message to receive messages, and stream-close-send when done sending."
   (ensure-connected channel)
-  (let* ((stream (channel-new-stream channel))
-         (stream-id (ag-http2:stream-id stream))
+  (let* ((h2-stream (channel-new-stream channel))
+         (stream-id (ag-http2:stream-id h2-stream))
+         (effective-timeout (or timeout (channel-default-timeout channel)))
          (call (make-instance 'grpc-call
                               :channel channel
                               :method method
                               :stream-id stream-id
                               :request-metadata metadata)))
-    ;; Send request headers (NOT end-stream, we're going to send data)
-    (channel-send-headers channel stream-id method
-                          :metadata metadata
-                          :timeout timeout
-                          :end-stream nil)
-    ;; Return the bidi stream object
-    (make-instance 'grpc-bidi-stream
-                   :call call
-                   :channel channel
-                   :stream-id stream-id
-                   :response-type response-type)))
+    ;; Create cl-context for this stream
+    (multiple-value-bind (ctx cancel-fn)
+        (if effective-timeout
+            (cl-context:with-timeout (cl-context:ensure-context) effective-timeout)
+            (values (cl-context:ensure-context) nil))
+      (let ((bidi-stream (make-instance 'grpc-bidi-stream
+                                        :call call
+                                        :channel channel
+                                        :stream-id stream-id
+                                        :response-type response-type
+                                        :cl-context ctx
+                                        :cancel-fn cancel-fn)))
+        ;; Register cleanup callback on HTTP/2 stream
+        (setf (ag-http2:stream-cleanup-callback h2-stream)
+              (lambda (stream)
+                (declare (ignore stream))
+                ;; Idempotent cleanup - check before calling
+                (let ((fn (stream-cancel-fn bidi-stream)))
+                  (when fn
+                    (funcall fn)
+                    (setf (stream-cancel-fn bidi-stream) nil)))))
+        ;; Send request headers (NOT end-stream, we're going to send data)
+        (channel-send-headers channel stream-id method
+                              :metadata metadata
+                              :timeout effective-timeout
+                              :end-stream nil)
+        ;; Return the bidi stream object
+        bidi-stream))))
 
 (defmethod stream-send ((bidi-stream grpc-bidi-stream) message)
   "Send a message on a bidirectional stream.
@@ -632,9 +841,16 @@ Returns the bidi-stream for chaining."
 (defun stream-close-send (bidi-stream)
   "Close the send side of a bidirectional stream.
 After this, no more messages can be sent, but messages can still be received.
+Non-blocking operation - no timeout needed, only context binding.
 Returns the bidi-stream."
+  (let ((ctx (stream-cl-context bidi-stream)))
+    (cl-context:with-context (ctx ctx)
+      (stream-close-send-internal bidi-stream))))
+
+(defun stream-close-send-internal (bidi-stream)
+  "Internal implementation - context already bound."
   (when (bidi-stream-send-closed-p bidi-stream)
-    (return-from stream-close-send bidi-stream))
+    (return-from stream-close-send-internal bidi-stream))
   (setf (bidi-stream-send-closed-p bidi-stream) t)
   (let* ((channel (bidi-stream-channel bidi-stream))
          (stream-id (bidi-stream-id bidi-stream))
@@ -646,11 +862,16 @@ Returns the bidi-stream."
   bidi-stream)
 
 (defmethod stream-read-message ((bidi-stream grpc-bidi-stream))
-  "Read the next message from a bidirectional stream.
+  "Read the next message from a bidirectional stream with timeout enforcement.
 Returns the deserialized message, or NIL if the stream is finished.
 When the stream ends, also sets stream-status."
+  (with-stream-timeout (bidi-stream)
+    (stream-read-message-internal bidi-stream)))
+
+(defun stream-read-message-internal (bidi-stream)
+  "Internal implementation - context already bound."
   (when (bidi-stream-recv-finished-p bidi-stream)
-    (return-from stream-read-message nil))
+    (return-from stream-read-message-internal nil))
   (let* ((call (stream-call bidi-stream))
          (channel (bidi-stream-channel bidi-stream))
          (stream-id (bidi-stream-id bidi-stream))
@@ -668,7 +889,7 @@ When the stream ends, also sets stream-status."
         (unless (and status-header (string= (cdr status-header) "200"))
           (setf (stream-status bidi-stream) +grpc-status-unknown+)
           (setf (bidi-stream-recv-finished-p bidi-stream) t)
-          (return-from stream-read-message nil))))
+          (return-from stream-read-message-internal nil))))
     ;; Get response encoding for decompression
     (let ((encoding (get-response-encoding (call-response-headers call))))
       ;; Try to decode a message from the buffer first
@@ -681,7 +902,7 @@ When the stream ends, also sets stream-status."
             (setf (fill-pointer buffer) 0)
             (loop for byte across remaining
                   do (vector-push-extend byte buffer)))
-          (return-from stream-read-message
+          (return-from stream-read-message-internal
             (if (bidi-stream-response-type bidi-stream)
                 (ag-proto:deserialize-from-bytes (bidi-stream-response-type bidi-stream) data)
                 data))))
@@ -703,7 +924,7 @@ When the stream ends, also sets stream-status."
               (decode-grpc-message buffer 0 encoding)
             (declare (ignore compressed consumed))
             (when data
-              (return-from stream-read-message
+              (return-from stream-read-message-internal
                 (if (bidi-stream-response-type bidi-stream)
                     (ag-proto:deserialize-from-bytes (bidi-stream-response-type bidi-stream) data)
                     data))))
@@ -721,7 +942,7 @@ When the stream ends, also sets stream-status."
                    :message (call-status-message call)
                    :headers (call-response-headers call)
                    :trailers (call-response-trailers call)))
-          (return-from stream-read-message nil)))
+          (return-from stream-read-message-internal nil)))
       ;; Read a frame
       (ag-http2:connection-read-frame conn)
       ;; Copy any new data to our buffer
@@ -738,7 +959,7 @@ When the stream ends, also sets stream-status."
             (setf (fill-pointer buffer) 0)
             (loop for byte across remaining
                   do (vector-push-extend byte buffer)))
-          (return-from stream-read-message
+          (return-from stream-read-message-internal
             (if (bidi-stream-response-type bidi-stream)
                 (ag-proto:deserialize-from-bytes (bidi-stream-response-type bidi-stream) data)
                 data))))))))

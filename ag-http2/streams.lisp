@@ -34,7 +34,9 @@
    (trailers :initform nil :accessor stream-trailers
              :documentation "Received trailers")
    (rst-stream-error :initform nil :accessor stream-rst-stream-error
-                     :documentation "RST_STREAM error code if received"))
+                     :documentation "RST_STREAM error code if received")
+   (cleanup-callback :initform nil :accessor stream-cleanup-callback
+                     :documentation "Optional callback invoked when stream closes"))
   (:documentation "Represents an HTTP/2 stream"))
 
 (defun make-http2-stream (id &key (initial-window-size 65535))
@@ -151,9 +153,13 @@ Client streams use odd IDs, server streams use even IDs."
     (multiplexer-get-stream mux id)))
 
 (defun multiplexer-close-stream (mux stream-id)
-  "Mark a stream as closed"
+  "Mark a stream as closed and invoke cleanup callback"
   (let ((stream (gethash stream-id (multiplexer-streams mux))))
     (when stream
+      ;; Invoke cleanup callback before closing
+      (let ((callback (stream-cleanup-callback stream)))
+        (when callback
+          (funcall callback stream)))
       (setf (stream-state stream) :closed))))
 
 (defun multiplexer-active-streams (mux)
