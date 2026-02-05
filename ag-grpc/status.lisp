@@ -84,12 +84,17 @@ Per gRPC spec, when RST_STREAM is received without grpc-status:
             :documentation "Response headers")
    (trailers :initarg :trailers :reader grpc-status-error-trailers
              :initform nil
-             :documentation "Response trailers"))
+             :documentation "Response trailers")
+   (cause :initarg :cause :reader grpc-status-error-cause
+          :initform nil
+          :documentation "Original condition that caused this error (for debugging)"))
   (:report (lambda (c s)
              (format s "gRPC error ~A (~A)~@[: ~A~]"
                      (grpc-status-error-code c)
                      (grpc-status-name (grpc-status-error-code c))
-                     (grpc-status-error-message c)))))
+                     (grpc-status-error-message c))
+             (when (grpc-status-error-cause c)
+               (format s "~%  Caused by: ~A" (grpc-status-error-cause c))))))
 
 (define-condition grpc-error (error)
   ((message :initarg :message :reader grpc-error-message))
