@@ -575,29 +575,54 @@ RESPONSE-TYPE - Response type symbol for deserialization
 Returns a grpc-client-stream object. Use stream-send to send messages,
 then stream-close-and-recv to finish and get the response."
   (ensure-connected channel)
-  (let* ((stream (channel-new-stream channel))
-         (stream-id (ag-http2:stream-id stream))
+  (let* ((h2-stream (channel-new-stream channel))
+         (stream-id (ag-http2:stream-id h2-stream))
+         (effective-timeout (or timeout (channel-default-timeout channel)))
          (call (make-instance 'grpc-call
                               :channel channel
                               :method method
                               :stream-id stream-id
                               :request-metadata metadata)))
-    ;; Send request headers (NOT end-stream, we're going to send data)
-    (channel-send-headers channel stream-id method
-                          :metadata metadata
-                          :timeout timeout
-                          :end-stream nil)
-    ;; Return the client stream object
-    (make-instance 'grpc-client-stream
-                   :call call
-                   :channel channel
-                   :stream-id stream-id
-                   :response-type response-type)))
+    ;; Create cl-context for this stream
+    (multiple-value-bind (ctx cancel-fn)
+        (if effective-timeout
+            (cl-context:with-timeout (cl-context:ensure-context) effective-timeout)
+            (values (cl-context:ensure-context) nil))
+      (let ((client-stream (make-instance 'grpc-client-stream
+                                          :call call
+                                          :channel channel
+                                          :stream-id stream-id
+                                          :response-type response-type
+                                          :cl-context ctx
+                                          :cancel-fn cancel-fn)))
+        ;; Register cleanup callback on HTTP/2 stream
+        (setf (ag-http2:stream-cleanup-callback h2-stream)
+              (lambda (stream)
+                (declare (ignore stream))
+                ;; Idempotent cleanup - check before calling
+                (let ((fn (stream-cancel-fn client-stream)))
+                  (when fn
+                    (funcall fn)
+                    (setf (stream-cancel-fn client-stream) nil)))))
+        ;; Send request headers (NOT end-stream, we're going to send data)
+        (channel-send-headers channel stream-id method
+                              :metadata metadata
+                              :timeout effective-timeout
+                              :end-stream nil)
+        ;; Return the client stream object
+        client-stream))))
 
 (defgeneric stream-send (stream message)
   (:documentation "Send a message on a streaming RPC.
 MESSAGE can be a proto-message or a byte vector.
 Returns the stream for chaining."))
+
+(defmethod stream-send :around ((stream t) message)
+  "Wrap all stream-send methods with context binding.
+No timeout needed - send operations are non-blocking."
+  (let ((ctx (stream-cl-context stream)))
+    (cl-context:with-context (ctx ctx)
+      (call-next-method))))
 
 (defmethod stream-send ((client-stream grpc-client-stream) message)
   "Send a message on a client stream."
@@ -613,9 +638,17 @@ Returns the stream for chaining."))
   client-stream)
 
 (defun stream-close-and-recv (client-stream)
-  "Close the client stream and receive the server's response.
+  "Close the client stream and receive the server's response with timeout enforcement.
 Signals END_STREAM to the server, then waits for the response.
 Returns (values response status) where response is the deserialized message."
+  (unwind-protect
+       (with-stream-timeout (client-stream)
+         (stream-close-and-recv-internal client-stream))
+    ;; Clean up context when done (idempotent)
+    (finalize-client-stream client-stream)))
+
+(defun stream-close-and-recv-internal (client-stream)
+  "Internal implementation - context already bound."
   (when (client-stream-closed-p client-stream)
     (error "Client stream already closed"))
   (setf (client-stream-closed-p client-stream) t)
@@ -634,7 +667,7 @@ Returns (values response status) where response is the deserialized message."
     (let ((status-header (assoc :status (call-response-headers call))))
       (unless (and status-header (string= (cdr status-header) "200"))
         (setf (call-status call) +grpc-status-unknown+)
-        (return-from stream-close-and-recv
+        (return-from stream-close-and-recv-internal
           (values nil (call-status call)))))
     ;; Get response encoding for decompression
     (let* ((encoding (get-response-encoding (call-response-headers call)))
