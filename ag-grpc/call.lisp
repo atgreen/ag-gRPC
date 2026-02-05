@@ -786,24 +786,42 @@ RESPONSE-TYPE - Response type symbol for deserialization
 Returns a grpc-bidi-stream object. Use stream-send to send messages,
 stream-read-message to receive messages, and stream-close-send when done sending."
   (ensure-connected channel)
-  (let* ((stream (channel-new-stream channel))
-         (stream-id (ag-http2:stream-id stream))
+  (let* ((h2-stream (channel-new-stream channel))
+         (stream-id (ag-http2:stream-id h2-stream))
+         (effective-timeout (or timeout (channel-default-timeout channel)))
          (call (make-instance 'grpc-call
                               :channel channel
                               :method method
                               :stream-id stream-id
                               :request-metadata metadata)))
-    ;; Send request headers (NOT end-stream, we're going to send data)
-    (channel-send-headers channel stream-id method
-                          :metadata metadata
-                          :timeout timeout
-                          :end-stream nil)
-    ;; Return the bidi stream object
-    (make-instance 'grpc-bidi-stream
-                   :call call
-                   :channel channel
-                   :stream-id stream-id
-                   :response-type response-type)))
+    ;; Create cl-context for this stream
+    (multiple-value-bind (ctx cancel-fn)
+        (if effective-timeout
+            (cl-context:with-timeout (cl-context:ensure-context) effective-timeout)
+            (values (cl-context:ensure-context) nil))
+      (let ((bidi-stream (make-instance 'grpc-bidi-stream
+                                        :call call
+                                        :channel channel
+                                        :stream-id stream-id
+                                        :response-type response-type
+                                        :cl-context ctx
+                                        :cancel-fn cancel-fn)))
+        ;; Register cleanup callback on HTTP/2 stream
+        (setf (ag-http2:stream-cleanup-callback h2-stream)
+              (lambda (stream)
+                (declare (ignore stream))
+                ;; Idempotent cleanup - check before calling
+                (let ((fn (stream-cancel-fn bidi-stream)))
+                  (when fn
+                    (funcall fn)
+                    (setf (stream-cancel-fn bidi-stream) nil)))))
+        ;; Send request headers (NOT end-stream, we're going to send data)
+        (channel-send-headers channel stream-id method
+                              :metadata metadata
+                              :timeout effective-timeout
+                              :end-stream nil)
+        ;; Return the bidi stream object
+        bidi-stream))))
 
 (defmethod stream-send ((bidi-stream grpc-bidi-stream) message)
   "Send a message on a bidirectional stream.
@@ -823,9 +841,16 @@ Returns the bidi-stream for chaining."
 (defun stream-close-send (bidi-stream)
   "Close the send side of a bidirectional stream.
 After this, no more messages can be sent, but messages can still be received.
+Non-blocking operation - no timeout needed, only context binding.
 Returns the bidi-stream."
+  (let ((ctx (stream-cl-context bidi-stream)))
+    (cl-context:with-context (ctx ctx)
+      (stream-close-send-internal bidi-stream))))
+
+(defun stream-close-send-internal (bidi-stream)
+  "Internal implementation - context already bound."
   (when (bidi-stream-send-closed-p bidi-stream)
-    (return-from stream-close-send bidi-stream))
+    (return-from stream-close-send-internal bidi-stream))
   (setf (bidi-stream-send-closed-p bidi-stream) t)
   (let* ((channel (bidi-stream-channel bidi-stream))
          (stream-id (bidi-stream-id bidi-stream))
@@ -837,11 +862,16 @@ Returns the bidi-stream."
   bidi-stream)
 
 (defmethod stream-read-message ((bidi-stream grpc-bidi-stream))
-  "Read the next message from a bidirectional stream.
+  "Read the next message from a bidirectional stream with timeout enforcement.
 Returns the deserialized message, or NIL if the stream is finished.
 When the stream ends, also sets stream-status."
+  (with-stream-timeout (bidi-stream)
+    (stream-read-message-internal bidi-stream)))
+
+(defun stream-read-message-internal (bidi-stream)
+  "Internal implementation - context already bound."
   (when (bidi-stream-recv-finished-p bidi-stream)
-    (return-from stream-read-message nil))
+    (return-from stream-read-message-internal nil))
   (let* ((call (stream-call bidi-stream))
          (channel (bidi-stream-channel bidi-stream))
          (stream-id (bidi-stream-id bidi-stream))
@@ -859,7 +889,7 @@ When the stream ends, also sets stream-status."
         (unless (and status-header (string= (cdr status-header) "200"))
           (setf (stream-status bidi-stream) +grpc-status-unknown+)
           (setf (bidi-stream-recv-finished-p bidi-stream) t)
-          (return-from stream-read-message nil))))
+          (return-from stream-read-message-internal-internal nil))))
     ;; Get response encoding for decompression
     (let ((encoding (get-response-encoding (call-response-headers call))))
       ;; Try to decode a message from the buffer first
@@ -872,7 +902,7 @@ When the stream ends, also sets stream-status."
             (setf (fill-pointer buffer) 0)
             (loop for byte across remaining
                   do (vector-push-extend byte buffer)))
-          (return-from stream-read-message
+          (return-from stream-read-message-internal
             (if (bidi-stream-response-type bidi-stream)
                 (ag-proto:deserialize-from-bytes (bidi-stream-response-type bidi-stream) data)
                 data))))
@@ -894,7 +924,7 @@ When the stream ends, also sets stream-status."
               (decode-grpc-message buffer 0 encoding)
             (declare (ignore compressed consumed))
             (when data
-              (return-from stream-read-message
+              (return-from stream-read-message-internal
                 (if (bidi-stream-response-type bidi-stream)
                     (ag-proto:deserialize-from-bytes (bidi-stream-response-type bidi-stream) data)
                     data))))
@@ -912,7 +942,7 @@ When the stream ends, also sets stream-status."
                    :message (call-status-message call)
                    :headers (call-response-headers call)
                    :trailers (call-response-trailers call)))
-          (return-from stream-read-message nil)))
+          (return-from stream-read-message-internal nil)))
       ;; Read a frame
       (ag-http2:connection-read-frame conn)
       ;; Copy any new data to our buffer
@@ -929,7 +959,7 @@ When the stream ends, also sets stream-status."
             (setf (fill-pointer buffer) 0)
             (loop for byte across remaining
                   do (vector-push-extend byte buffer)))
-          (return-from stream-read-message
+          (return-from stream-read-message-internal
             (if (bidi-stream-response-type bidi-stream)
                 (ag-proto:deserialize-from-bytes (bidi-stream-response-type bidi-stream) data)
                 data))))))))
