@@ -385,7 +385,17 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
 ;;;; ========================================================================
 
 (defun connection-close (conn &key (error-code +error-no-error+) debug-data)
-  "Close the HTTP/2 connection gracefully"
+  "Close the HTTP/2 connection gracefully and invoke cleanup callbacks"
+  ;; Invoke cleanup callbacks for all streams before closing
+  (let ((mux (connection-multiplexer conn)))
+    (maphash
+     (lambda (stream-id stream)
+       (declare (ignore stream-id))
+       (let ((callback (stream-cleanup-callback stream)))
+         (when callback
+           (funcall callback stream))))
+     (multiplexer-streams mux)))
+  ;; Now close the connection
   (when (eq (connection-state conn) :open)
     (setf (connection-state conn) :closing)
     (write-frame (make-goaway-frame (connection-last-stream-id conn)
