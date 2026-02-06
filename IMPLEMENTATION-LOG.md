@@ -184,3 +184,64 @@ Fix Finding #1: Streaming handlers currently block connection thread by calling
 ✅ All 241 tests pass
 
 **Ready to proceed with Day 4: Cleanup + Limits**
+
+---
+
+## Day 4: Cleanup + Limits (2026-02-06)
+
+### Goal
+Fix Findings #3 and #4:
+- Finding #3: Closed streams never removed (memory leaks)
+- Finding #4: Max concurrent streams not enforced
+
+### Changes Made ✓
+
+**1. Extended Stream Cleanup Callback** (`ag-grpc/server.lisp:465-480`):
+- Cancel context if not already cancelled
+- Remove stream state via `connection-remove-stream-state`
+- Remove message buffer from `stream-buffers` hash table
+- Decrement `active-streams` counter
+
+**2. Added Max Concurrent Streams Enforcement** (`ag-grpc/server.lisp:434-438`):
+- Check `connection-active-streams` against `server-max-concurrent-streams`
+- Send `RST_STREAM` with `REFUSED_STREAM` error if over limit
+- Return early to reject new stream creation
+
+**3. Increment Active Streams Counter** (`ag-grpc/server.lisp:465-467`):
+- Increment counter when stream is created (after handler lookup)
+- Thread-safe increment using `bt:with-lock-held`
+- Paired with decrement in cleanup callback
+
+### Testing ✓
+- All 241 tests pass
+- No regressions introduced
+- Fixes Finding #3 (memory leaks from uncleaned streams)
+- Fixes Finding #4 (max concurrent streams enforcement)
+
+---
+
+## Day 4 Summary
+
+✅ Stream cleanup callback extended (cancels context, removes all state)
+✅ Active streams counter incremented/decremented properly
+✅ Max concurrent streams enforced (rejects with REFUSED_STREAM)
+✅ All 241 tests pass
+✅ Fixes Findings #3 and #4
+
+**All core concurrency issues (Findings #1-4) are now fixed!**
+
+**Ready to proceed with Day 5: Integration Tests**
+
+---
+
+## Day 5: Integration Tests (2026-02-06)
+
+### Goal
+Add integration tests to verify all concurrency fixes work correctly:
+1. Streaming RPCs don't block unary RPCs (Finding #1)
+2. Cleanup removes closed streams (Finding #3)
+3. Max concurrent streams enforced (Finding #4)
+4. Handler exceptions don't crash connection
+5. Connection close terminates handlers
+
+### Implementation Steps

@@ -431,6 +431,11 @@ If GRACEFUL is true, wait for active connections to finish."
       (server-send-error conn stream-id +grpc-status-unimplemented+
                          (format nil "Method not found: ~A" method-path))
       (return-from server-handle-headers))
+    ;; Enforce max concurrent streams (Finding #4)
+    (when (>= (ag-http2:connection-active-streams conn)
+              (server-max-concurrent-streams server))
+      (ag-http2:connection-send-rst-stream conn stream-id ag-http2:+error-refused-stream+)
+      (return-from server-handle-headers))
     ;; Parse timeout and create cl-cancel context with deadline
     (let ((timeout-header (cdr (assoc "grpc-timeout" headers :test #'string-equal))))
       (multiple-value-bind (call-ctx cancel-fn)
@@ -461,15 +466,26 @@ If GRACEFUL is true, wait for active connections to finish."
       ;; Store context for DATA frame handling (connection-local, thread-safe)
       (connection-set-stream-context conn h2-stream ctx)
       (connection-set-stream-handler conn h2-stream handler)
-      ;; Register cleanup callback on HTTP/2 stream
+      ;; Increment active streams counter (Finding #4)
+      (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
+        (incf (ag-http2:connection-active-streams conn)))
+      ;; Register cleanup callback on HTTP/2 stream (fixes Finding #3)
       (setf (ag-http2:stream-cleanup-callback h2-stream)
             (lambda (stream)
               (declare (ignore stream))
-              ;; Idempotent cleanup - check before calling
+              ;; Cancel context if not already
               (let ((fn (context-cancel-fn ctx)))
                 (when fn
                   (funcall fn)
-                  (setf (context-cancel-fn ctx) nil)))))
+                  (setf (context-cancel-fn ctx) nil)))
+              ;; Remove stream state from connection maps
+              (connection-remove-stream-state conn h2-stream)
+              ;; Remove message buffer if exists
+              (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
+                (remhash stream-id (ag-http2:connection-stream-buffers conn)))
+              ;; Decrement active streams counter
+              (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
+                (decf (ag-http2:connection-active-streams conn)))))
       ;; For streaming RPCs, create message buffer and spawn handler thread.
       ;; For unary RPCs, wait for END_STREAM.
       (let ((is-streaming (or (handler-client-streaming-p handler)
