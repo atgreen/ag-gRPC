@@ -436,6 +436,33 @@ ag-gRPC includes full server-side support for hosting gRPC services:
 (ag-grpc:server-start *server*)
 ```
 
+### Server Configuration
+
+Configure server behavior with optional parameters:
+
+```lisp
+(defvar *server* (ag-grpc:make-grpc-server 50051
+                   :host "0.0.0.0"                    ; Bind address
+                   :max-concurrent-streams 100        ; Max streams per connection
+                   :max-connections 128               ; Max concurrent connections
+                   :tls t                             ; Enable TLS
+                   :tls-certificate "/path/to/cert.pem"
+                   :tls-key "/path/to/key.pem"))
+```
+
+**Configuration Options:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `:host` | "0.0.0.0" | Server bind address |
+| `:max-concurrent-streams` | 100 | Maximum concurrent streams per HTTP/2 connection |
+| `:max-connections` | 128 | Maximum concurrent client connections |
+| `:tls` | `nil` | Enable TLS encryption |
+| `:tls-certificate` | `nil` | Path to TLS certificate file |
+| `:tls-key` | `nil` | Path to TLS private key file |
+| `:tls-ca-certificate` | `nil` | Path to CA certificate for client verification |
+| `:tls-verify-client` | `nil` | Require and verify client certificates |
+
 ### Using with-grpc-server
 
 ```lisp
