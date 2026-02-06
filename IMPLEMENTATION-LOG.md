@@ -113,3 +113,43 @@
 ### Next: Day 3 - Async Handlers + Frame Buffering
 
 **Ready to proceed with Day 3**
+
+---
+
+## Day 3: Async Handlers + Frame Buffering (2026-02-06)
+
+### Goal
+Fix Finding #1: Streaming handlers currently block connection thread by calling
+`connection-read-frame`. Need to:
+1. Connection thread appends DATA to per-stream message buffers
+2. `stream-recv` reads from buffer (blocks on condition variable, not frame read)
+3. Streaming handlers run in separate threads
+
+### Implementation Steps
+
+**Step 3.1: Create Stream Message Buffer Structure** ✓
+- Added `stream-message-buffer` struct with:
+  - Messages array (bounded queue)
+  - Lock and condition variable for synchronization
+  - Closed flag for EOF signaling
+  - Error field for propagating failures
+- Added `buffer-push-message` (connection thread appends)
+- Added `buffer-pop-message` (handler thread consumes, blocks if empty)
+- Added `buffer-close` (signals end-of-stream)
+
+**Step 3.2: Spawn Handler Threads** ⏭️
+- Need to modify server-handle-headers to spawn threads for streaming
+- Store buffer in connection-stream-buffers map
+- Handler runs in separate thread (doesn't block connection)
+
+**Step 3.3: Refactor stream-recv** ⏭️
+- Change from calling connection-read-frame to buffer-pop-message
+- Remove blocking loop
+- Return nil when buffer closed
+
+**Step 3.4: Update DATA Frame Handling** ⏭️
+- Decode gRPC message in connection thread
+- Append to buffer instead of stream data buffer
+- Signal condition variable to wake handler
+
+**Status**: Buffer structure complete, need to wire it up

@@ -868,6 +868,65 @@ Example:
 ;;; Add slots to store context and handler on HTTP/2 streams
 ;;; These are accessed via methods below
 
+;;;; Per-stream message buffer for async handlers
+;;;; Connection thread appends decoded messages, handler threads consume
+
+(defstruct stream-message-buffer
+  "Thread-safe message buffer for streaming RPCs"
+  (messages (make-array 10 :fill-pointer 0 :adjustable t)
+            :type vector
+            :documentation "Queue of decoded protobuf messages")
+  (lock (bt:make-lock "stream-buffer-lock")
+        :type bt:lock
+        :documentation "Protects messages array")
+  (cv (bt:make-condition-variable :name "stream-buffer-cv")
+      :type bt:condition-variable
+      :documentation "Signals when new message arrives")
+  (closed-p nil
+            :type boolean
+            :documentation "T when stream is closed (no more messages)")
+  (error nil
+         :documentation "Error condition if stream failed"))
+
+(defun buffer-push-message (buffer message)
+  "Append a message to the buffer (called by connection thread)"
+  (bt:with-lock-held ((stream-message-buffer-lock buffer))
+    (vector-push-extend message (stream-message-buffer-messages buffer))
+    (bt:condition-notify (stream-message-buffer-cv buffer))))
+
+(defun buffer-pop-message (buffer)
+  "Read a message from the buffer, blocking if empty (called by handler thread).
+Returns: (values message found-p) or (values nil nil) if closed."
+  (bt:with-lock-held ((stream-message-buffer-lock buffer))
+    (loop
+      ;; Check for error first
+      (when (stream-message-buffer-error buffer)
+        (error (stream-message-buffer-error buffer)))
+      ;; Check if closed
+      (when (and (stream-message-buffer-closed-p buffer)
+                 (zerop (length (stream-message-buffer-messages buffer))))
+        (return (values nil nil)))
+      ;; Try to get message
+      (let ((msgs (stream-message-buffer-messages buffer)))
+        (when (plusp (length msgs))
+          (let ((msg (aref msgs 0)))
+            ;; Remove first element by shifting
+            (loop for i from 1 below (length msgs)
+                  do (setf (aref msgs (1- i)) (aref msgs i)))
+            (decf (fill-pointer msgs))
+            (return (values msg t)))))
+      ;; No message available, wait
+      (bt:condition-wait (stream-message-buffer-cv buffer)
+                         (stream-message-buffer-lock buffer)))))
+
+(defun buffer-close (buffer &optional error)
+  "Mark buffer as closed (called when stream ends)"
+  (bt:with-lock-held ((stream-message-buffer-lock buffer))
+    (setf (stream-message-buffer-closed-p buffer) t)
+    (when error
+      (setf (stream-message-buffer-error buffer) error))
+    (bt:condition-notify (stream-message-buffer-cv buffer))))
+
 ;;;; Connection-local stream state (thread-safe)
 ;;;; Replaced global *stream-contexts* and *stream-handlers* to fix
 ;;;; thread-safety issue (Finding #2 from code review)
