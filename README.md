@@ -536,7 +536,7 @@ Server handlers can detect when clients cancel RPCs:
 
 ## Timeouts, Deadlines, and Context
 
-ag-gRPC integrates with [cl-context](https://github.com/green/cl-context) for cooperative cancellation, deadline enforcement, and request-scoped values.
+ag-gRPC integrates with [cl-context](https://github.com/atgreen/cl-context) for cooperative cancellation, deadline enforcement, and request-scoped values.
 
 ### How Timeout Parameters Work
 
