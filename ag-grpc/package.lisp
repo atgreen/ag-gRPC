@@ -174,13 +174,6 @@
    #:context-set-response-metadata
    #:context-set-trailing-metadata
 
-   ;; Context values (cl-cancel integration)
-   #:grpc-context-value
-   #:+grpc-request-id+
-   #:+grpc-trace-context+
-   #:+grpc-auth-token+
-   #:+grpc-peer-address+
-
    ;; Server streams
    #:grpc-server-call-stream
    #:stream-recv

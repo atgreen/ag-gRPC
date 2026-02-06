@@ -11,7 +11,6 @@
   :pathname "ag-grpc"
   :components ((:file "package")
                (:file "constants")
-               (:file "context-values")
                (:file "status")
                (:file "framing")
                (:file "metadata")

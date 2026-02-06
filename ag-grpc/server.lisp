@@ -448,9 +448,6 @@ If GRACEFUL is true, wait for active connections to finish."
                                   :peer-address peer-addr
                                   :cancel-context call-ctx
                                   :cancel-fn cancel-fn)))
-          ;; Enrich context with request-scoped values from headers
-          (setf (slot-value ctx 'cancel-context)
-                (enrich-context-from-metadata call-ctx headers peer-addr))
           ;; Extract compression encoding from client request
       (let ((request-encoding (cdr (assoc "grpc-encoding" headers :test #'string-equal))))
         (when (and request-encoding (not (string-equal request-encoding "identity")))
