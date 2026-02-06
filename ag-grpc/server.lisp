@@ -143,10 +143,10 @@ SERVER-STREAMING - T if server sends multiple messages"
    (peer-address :initarg :peer-address :reader context-peer-address
                  :documentation "Client address (host:port)")
 
-   ;; cl-context integration
-   (cl-context :initarg :cl-context
-               :accessor context-cl-context
-               :initform (cl-context:background)
+   ;; cl-cancel integration
+   (cancel-context :initarg :cancel-context
+               :accessor context-cancel-context
+               :initform (cl-cancel:background)
                :documentation "Context for cancellation/deadlines")
    (cancel-fn :initarg :cancel-fn
               :accessor context-cancel-fn
@@ -157,8 +157,8 @@ SERVER-STREAMING - T if server sends multiple messages"
    (deadline :initform nil :accessor context-deadline
              :documentation "Absolute deadline (seconds, rational)")
    (deadline-synced-p :initform nil :accessor context-deadline-synced-p
-                      :documentation "T if deadline cached from cl-context")
-   (cancelled-p :initform nil :accessor context-cancelled-p
+                      :documentation "T if deadline cached from cl-cancel")
+   (cancelled-p :initform nil :accessor cancelled-p
                 :documentation "Cached cancellation state")
 
    ;; Response state (mutable)
@@ -192,36 +192,36 @@ SERVER-STREAMING - T if server sends multiple messages"
   "Set trailing metadata to be sent with trailers"
   (setf (context-trailing-metadata ctx) metadata))
 
-;; Sync deadline from cl-context on first access
+;; Sync deadline from cl-cancel on first access
 (defmethod context-deadline :around ((ctx grpc-call-context))
-  "Sync deadline from cl-context on first access"
+  "Sync deadline from cl-cancel on first access"
   (unless (context-deadline-synced-p ctx)
-    (let ((ctx-deadline (cl-context:deadline (context-cl-context ctx))))
+    (let ((ctx-deadline (cl-cancel:deadline (context-cancel-context ctx))))
       (when ctx-deadline
         (setf (slot-value ctx 'deadline) ctx-deadline)))
     (setf (context-deadline-synced-p ctx) t))
   (call-next-method))
 
 (defun context-check-cancelled (ctx)
-  "Check if cancelled via RST_STREAM or cl-context.
-  Updates and returns context-cancelled-p. Never signals.
+  "Check if cancelled via RST_STREAM or cl-cancel.
+  Updates and returns cancelled-p. Never signals.
 
   Pure predicate: uses done-p + err, not check-context (avoids side effects).
   For signaling behavior, use context-ensure-not-cancelled."
-  (unless (context-cancelled-p ctx)
+  (unless (cancelled-p ctx)
     ;; Check HTTP/2 RST_STREAM
     (let* ((stream-id (context-stream-id ctx))
            (h2-stream (ag-http2:multiplexer-get-stream
                        (ag-http2:connection-multiplexer (context-connection ctx))
                        stream-id)))
       (when (and h2-stream (ag-http2:stream-rst-stream-error h2-stream))
-        (setf (context-cancelled-p ctx) t)))
+        (setf (cancelled-p ctx) t)))
 
-    ;; Check cl-context cancellation (use done-p, not check-context)
-    (when (cl-context:done-p (context-cl-context ctx))
-      (setf (context-cancelled-p ctx) t)))
+    ;; Check cl-cancel cancellation (use done-p, not check-context)
+    (when (cl-cancel:done-p (context-cancel-context ctx))
+      (setf (cancelled-p ctx) t)))
 
-  (context-cancelled-p ctx))
+  (cancelled-p ctx))
 
 (defun context-ensure-not-cancelled (ctx)
   "Check if cancelled and signal grpc-status-error if so.
@@ -236,10 +236,10 @@ SERVER-STREAMING - T if server sends multiple messages"
   This ensures deadline errors are reported even if RST_STREAM also present."
 
   ;; First check deadline (highest precedence)
-  (let ((cl-ctx (context-cl-context ctx)))
-    (when (cl-context:done-p cl-ctx)
-      (let ((err (cl-context:err cl-ctx)))
-        (when (typep err 'cl-context:context-deadline-exceeded)
+  (let ((cl-ctx (context-cancel-context ctx)))
+    (when (cl-cancel:done-p cl-ctx)
+      (let ((err (cl-cancel:err cl-ctx)))
+        (when (typep err 'cl-cancel:deadline-exceeded)
           (error 'grpc-status-error
                  :code +grpc-status-deadline-exceeded+
                  :message (format nil "~A" err)
@@ -259,10 +259,10 @@ SERVER-STREAMING - T if server sends multiple messages"
              :headers (context-request-headers ctx)
              :trailers nil)))
 
-  ;; Finally check other cl-context cancellation
+  ;; Finally check other cl-cancel cancellation
   (handler-case
-      (cl-context:check-context cl-ctx)
-    (cl-context:context-cancelled (e)
+      (cl-cancel:check-cancellation cl-ctx)
+    (cl-cancel:cancelled (e)
       (error 'grpc-status-error
              :code +grpc-status-cancelled+
              :message (format nil "~A" e)
@@ -431,25 +431,25 @@ If GRACEFUL is true, wait for active connections to finish."
       (server-send-error conn stream-id +grpc-status-unimplemented+
                          (format nil "Method not found: ~A" method-path))
       (return-from server-handle-headers))
-    ;; Parse timeout and create cl-context with deadline
+    ;; Parse timeout and create cl-cancel context with deadline
     (let ((timeout-header (cdr (assoc "grpc-timeout" headers :test #'string-equal))))
       (multiple-value-bind (call-ctx cancel-fn)
           (if timeout-header
               (let* ((timeout-seconds (parse-grpc-timeout timeout-header))
                      (deadline (+ (grpc-current-time) timeout-seconds)))
-                (cl-context:with-deadline (cl-context:ensure-context) deadline))
-              (values (cl-context:ensure-context) nil))
-        ;; Create call context with cl-context
+                (cl-cancel:with-deadline (cl-cancel:ensure-cancellable) deadline))
+              (values (cl-cancel:ensure-cancellable) nil))
+        ;; Create call context with cl-cancel
         (let ((ctx (make-instance 'grpc-call-context
                                   :connection conn
                                   :stream-id stream-id
                                   :method method-path
                                   :headers headers
                                   :peer-address peer-addr
-                                  :cl-context call-ctx
+                                  :cancel-context call-ctx
                                   :cancel-fn cancel-fn)))
           ;; Enrich context with request-scoped values from headers
-          (setf (slot-value ctx 'cl-context)
+          (setf (slot-value ctx 'cancel-context)
                 (enrich-context-from-metadata call-ctx headers peer-addr))
           ;; Extract compression encoding from client request
       (let ((request-encoding (cdr (assoc "grpc-encoding" headers :test #'string-equal))))
@@ -514,9 +514,9 @@ If GRACEFUL is true, wait for active connections to finish."
 
 (defun server-dispatch-handler (server conn ctx handler request-data)
   "Dispatch to the appropriate handler based on streaming type"
-  ;; Bind *current-context* from grpc-call-context for handler execution
-  (let ((call-ctx (context-cl-context ctx)))
-    (cl-context:with-context (call-ctx call-ctx)
+  ;; Bind *current-cancel-context* from grpc-call-context for handler execution
+  (let ((call-ctx (context-cancel-context ctx)))
+    (cl-cancel:with-cancel-context (call-ctx call-ctx)
       (let* ((client-streaming (handler-client-streaming-p handler))
              (server-streaming (handler-server-streaming-p handler))
              (handler-type (cond
@@ -757,7 +757,7 @@ Returns the deserialized message, or NIL if no more messages."
       (ag-http2:connection-read-frame conn)
       ;; Check for client cancellation (RST_STREAM received)
       (when (ag-http2:stream-rst-stream-error h2-stream)
-        (setf (context-cancelled-p (server-stream-context stream)) t)
+        (setf (cancelled-p (server-stream-context stream)) t)
         (setf (server-stream-recv-closed-p stream) t)
         (return-from stream-recv nil))
       ;; Copy new data to our buffer

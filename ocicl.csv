@@ -17,7 +17,7 @@ cffi-uffi-compat, ghcr.io/ocicl/cffi-grovel@sha256:0854274d437e36f8bd30549103de3
 chipz, ghcr.io/ocicl/chipz@sha256:fae0fae0c93199ba57c92d9102245a55c8a2c12af4442e0b141d5670bef4f2f0, chipz-20240503-6f80368/chipz.asd
 cl-base64, ghcr.io/ocicl/cl-base64@sha256:702412dbc1ed825e275fb23e22c29527eb786bf644e47c7621bf0dbb34e17c7e, cl-base64-20240503-80496b7/cl-base64.asd
 cl-base64-tests, ghcr.io/ocicl/cl-base64@sha256:702412dbc1ed825e275fb23e22c29527eb786bf644e47c7621bf0dbb34e17c7e, cl-base64-20240503-80496b7/cl-base64-tests.asd
-cl-context, ghcr.io/ocicl/cl-context@sha256:2c66d22fd2b10bbbaec6309940c8c01a22fe6710175b7f4143c3bdb86d96e733, cl-context-20260205-b61eaa0/cl-context.asd
+cl-cancel, ghcr.io/ocicl/cl-cancel@sha256:9cc75ae167078c0d709f8ac0f61d6596393c300d56d302df0d2842b875c8b065, cl-cancel-20260206-0f99b2e/cl-cancel.asd
 cl-ppcre, ghcr.io/ocicl/cl-ppcre@sha256:bf073924cf4fd5957a4fd961a95d446ed0e53fa32a5002cbd2d52182874f45e5, cl-ppcre-20250606-a2ea581/cl-ppcre.asd
 cl-ppcre-unicode, ghcr.io/ocicl/cl-ppcre@sha256:bf073924cf4fd5957a4fd961a95d446ed0e53fa32a5002cbd2d52182874f45e5, cl-ppcre-20250606-a2ea581/cl-ppcre-unicode.asd
 cl-reexport, ghcr.io/ocicl/cl-reexport@sha256:c795feb3e3727a19e61797187eb31bac1e855b1332335d26752200a28e9b9da8, cl-reexport-20240503-03ad7a0/cl-reexport.asd

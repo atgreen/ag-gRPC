@@ -2,23 +2,20 @@
 
 (defpackage #:ag-grpc
   (:use #:cl)
-  ;; Import cl-context symbols for use
-  (:import-from #:cl-context
-                #:*current-context*
-                #:check-context
-                #:with-context
-                #:with-timeout
-                #:with-deadline
+  ;; Import cl-cancel symbols for use
+  (:import-from #:cl-cancel
+                #:*current-cancel-context*
+                #:check-cancellation
+                #:with-timeout-context
+                #:with-deadline-context
                 #:with-cancel
-                #:with-value
                 #:done-p
                 #:err
                 #:deadline
-                #:get-current-time
-                #:ensure-context
-                #:define-context-key
-                #:context-cancelled
-                #:context-deadline-exceeded)
+                #:ensure-cancellable
+                #:background
+                #:cancelled
+                #:deadline-exceeded)
   (:export
    ;; Version
    #:+version+
@@ -171,13 +168,13 @@
    #:context-metadata
    #:context-peer-address
    #:context-deadline
-   #:context-cancelled-p
+   #:cancelled-p
    #:context-check-cancelled
    #:context-ensure-not-cancelled
    #:context-set-response-metadata
    #:context-set-trailing-metadata
 
-   ;; Context values (cl-context integration)
+   ;; Context values (cl-cancel integration)
    #:grpc-context-value
    #:+grpc-request-id+
    #:+grpc-trace-context+

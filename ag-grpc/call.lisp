@@ -16,20 +16,20 @@ Three-branch pattern:
 
 Maps DEADLINE exceptions only (timeout-related):
 - bt2:timeout → grpc-status-error with DEADLINE_EXCEEDED
-- cl-context:context-deadline-exceeded → grpc-status-error with DEADLINE_EXCEEDED
+- cl-cancel:deadline-exceeded → grpc-status-error with DEADLINE_EXCEEDED
 
 Does NOT map cancellation exceptions:
-- cl-context:context-cancelled is handled by higher-level code
+- cl-cancel:cancelled is handled by higher-level code
 
 Preserves original condition in :cause slot (grpc-status-error-cause) for debugging."
   (let ((ctx-var (gensym "CTX"))
         (deadline-var (gensym "DEADLINE"))
         (remaining-var (gensym "REMAINING")))
-    `(let ((,ctx-var (stream-cl-context ,stream)))
-       (cl-context:with-context (,ctx-var ,ctx-var)
-         (let* ((,deadline-var (cl-context:deadline ,ctx-var))
+    `(let ((,ctx-var (stream-cancel-context ,stream)))
+       (cl-cancel:with-cancel-context (,ctx-var ,ctx-var)
+         (let* ((,deadline-var (cl-cancel:deadline ,ctx-var))
                 (,remaining-var (when ,deadline-var
-                                  (- ,deadline-var (cl-context:get-current-time)))))
+                                  (- ,deadline-var (cl-cancel:get-current-time)))))
            (cond
              ((and ,remaining-var (> ,remaining-var 0))
               (handler-case
@@ -40,7 +40,7 @@ Preserves original condition in :cause slot (grpc-status-error-cause) for debugg
                          :code +grpc-status-deadline-exceeded+
                          :message "Deadline exceeded"
                          :cause c))
-                (cl-context:context-deadline-exceeded (c)
+                (cl-cancel:deadline-exceeded (c)
                   (error 'grpc-status-error
                          :code +grpc-status-deadline-exceeded+
                          :message (format nil "Deadline exceeded: ~A" c)
@@ -48,9 +48,9 @@ Preserves original condition in :cause slot (grpc-status-error-cause) for debugg
              (,deadline-var
               (handler-case
                   (progn
-                    (cl-context:check-context ,ctx-var)
+                    (cl-cancel:check-cancellation ,ctx-var)
                     ,@body)
-                (cl-context:context-deadline-exceeded (c)
+                (cl-cancel:deadline-exceeded (c)
                   (error 'grpc-status-error
                          :code +grpc-status-deadline-exceeded+
                          :message (format nil "Deadline exceeded: ~A" c)
@@ -138,11 +138,11 @@ The response is available via (call-response call)."
                               :request-metadata metadata))
          ;; Use provided timeout, fall back to channel default
          (effective-timeout (or timeout (channel-default-timeout channel))))
-    ;; Create cl-context for this call
+    ;; Create cl-cancel context for this call
     (multiple-value-bind (ctx cancel-fn)
         (if effective-timeout
-            (cl-context:with-timeout (cl-context:ensure-context) effective-timeout)
-            (values (cl-context:ensure-context) nil))
+            (cl-cancel:with-timeout (cl-cancel:ensure-cancellable) effective-timeout)
+            (values (cl-cancel:ensure-cancellable) nil))
       (unwind-protect
            (progn
              ;; Send request headers (includes grpc-timeout for server-side enforcement)
@@ -162,7 +162,7 @@ The response is available via (call-response call)."
                       ;; Process headers and receive body/trailers (rest of the call)
                       (call-unary-process-response channel call stream-id response-type)))
                ;; Bind context and wrap with bt2:with-timeout for hard deadline
-               (cl-context:with-context (ctx ctx)
+               (cl-cancel:with-cancel-context (ctx ctx)
                  (handler-case
                      (if effective-timeout
                          ;; bt2:with-timeout provides preemptive interruption
@@ -170,7 +170,7 @@ The response is available via (call-response call)."
                            (do-receive))
                          (do-receive))
                    ;; Map both deadline mechanisms to DEADLINE_EXCEEDED
-                   ((or bt2:timeout cl-context:context-deadline-exceeded) (c)
+                   ((or bt2:timeout cl-cancel:deadline-exceeded) (c)
                      (channel-cancel-stream channel stream-id)
                      (setf (call-status call) +grpc-status-deadline-exceeded+)
                      (setf (call-status-message call) "Deadline exceeded")
@@ -181,7 +181,7 @@ The response is available via (call-response call)."
                             :trailers nil
                             :cause c))
                    ;; Handle explicit cancellation
-                   (cl-context:context-cancelled (c)
+                   (cl-cancel:cancelled (c)
                      (channel-cancel-stream channel stream-id)
                      (setf (call-status call) +grpc-status-cancelled+)
                      (setf (call-status-message call) "Cancelled")
@@ -317,9 +317,9 @@ Validates headers, receives body and trailers, extracts status."
    (stream-id :initarg :stream-id :accessor stream-call-stream-id)
    (method :initarg :method :accessor stream-call-method)
 
-   ;; cl-context integration
-   (cl-context :initarg :cl-context
-               :accessor stream-cl-context
+   ;; cl-cancel integration
+   (cancel-context :initarg :cancel-context
+               :accessor stream-cancel-context
                :documentation "Context for cancellation/deadlines")
    (cancel-fn :initarg :cancel-fn
               :accessor stream-cancel-fn
@@ -349,17 +349,17 @@ Returns a grpc-server-stream object. Use stream-receive-message to get responses
   (let* ((h2-stream (channel-new-stream channel))
          (stream-id (ag-http2:stream-id h2-stream))
          (effective-timeout (or timeout (channel-default-timeout channel))))
-    ;; Create cl-context for this stream
+    ;; Create cl-cancel context for this stream
     (multiple-value-bind (ctx cancel-fn)
         (if effective-timeout
-            (cl-context:with-timeout (cl-context:ensure-context) effective-timeout)
-            (values (cl-context:ensure-context) nil))
+            (cl-cancel:with-timeout (cl-cancel:ensure-cancellable) effective-timeout)
+            (values (cl-cancel:ensure-cancellable) nil))
       (let ((server-stream (make-instance 'grpc-server-stream
                                           :channel channel
                                           :stream-id stream-id
                                           :method method
                                           :response-type response-type
-                                          :cl-context ctx
+                                          :cancel-context ctx
                                           :cancel-fn cancel-fn)))
         ;; Register cleanup callback on HTTP/2 stream
         (setf (ag-http2:stream-cleanup-callback h2-stream)
@@ -548,9 +548,9 @@ Example: (make-method-path \"helloworld.Greeter\" \"SayHello\")
    (stream-id :initarg :stream-id :accessor client-stream-id
               :documentation "HTTP/2 stream ID")
 
-   ;; cl-context integration
-   (cl-context :initarg :cl-context
-               :accessor stream-cl-context
+   ;; cl-cancel integration
+   (cancel-context :initarg :cancel-context
+               :accessor stream-cancel-context
                :documentation "Context for cancellation/deadlines")
    (cancel-fn :initarg :cancel-fn
               :accessor stream-cancel-fn
@@ -583,17 +583,17 @@ then stream-close-and-recv to finish and get the response."
                               :method method
                               :stream-id stream-id
                               :request-metadata metadata)))
-    ;; Create cl-context for this stream
+    ;; Create cl-cancel context for this stream
     (multiple-value-bind (ctx cancel-fn)
         (if effective-timeout
-            (cl-context:with-timeout (cl-context:ensure-context) effective-timeout)
-            (values (cl-context:ensure-context) nil))
+            (cl-cancel:with-timeout (cl-cancel:ensure-cancellable) effective-timeout)
+            (values (cl-cancel:ensure-cancellable) nil))
       (let ((client-stream (make-instance 'grpc-client-stream
                                           :call call
                                           :channel channel
                                           :stream-id stream-id
                                           :response-type response-type
-                                          :cl-context ctx
+                                          :cancel-context ctx
                                           :cancel-fn cancel-fn)))
         ;; Register cleanup callback on HTTP/2 stream
         (setf (ag-http2:stream-cleanup-callback h2-stream)
@@ -620,8 +620,8 @@ Returns the stream for chaining."))
 (defmethod stream-send :around ((stream t) message)
   "Wrap all stream-send methods with context binding.
 No timeout needed - send operations are non-blocking."
-  (let ((ctx (stream-cl-context stream)))
-    (cl-context:with-context (ctx ctx)
+  (let ((ctx (stream-cancel-context stream)))
+    (cl-cancel:with-cancel-context (ctx ctx)
       (call-next-method))))
 
 (defmethod stream-send ((client-stream grpc-client-stream) message)
@@ -751,9 +751,9 @@ Example:
    (stream-id :initarg :stream-id :accessor bidi-stream-id
               :documentation "HTTP/2 stream ID")
 
-   ;; cl-context integration
-   (cl-context :initarg :cl-context
-               :accessor stream-cl-context
+   ;; cl-cancel integration
+   (cancel-context :initarg :cancel-context
+               :accessor stream-cancel-context
                :documentation "Context for cancellation/deadlines")
    (cancel-fn :initarg :cancel-fn
               :accessor stream-cancel-fn
@@ -794,17 +794,17 @@ stream-read-message to receive messages, and stream-close-send when done sending
                               :method method
                               :stream-id stream-id
                               :request-metadata metadata)))
-    ;; Create cl-context for this stream
+    ;; Create cl-cancel context for this stream
     (multiple-value-bind (ctx cancel-fn)
         (if effective-timeout
-            (cl-context:with-timeout (cl-context:ensure-context) effective-timeout)
-            (values (cl-context:ensure-context) nil))
+            (cl-cancel:with-timeout (cl-cancel:ensure-cancellable) effective-timeout)
+            (values (cl-cancel:ensure-cancellable) nil))
       (let ((bidi-stream (make-instance 'grpc-bidi-stream
                                         :call call
                                         :channel channel
                                         :stream-id stream-id
                                         :response-type response-type
-                                        :cl-context ctx
+                                        :cancel-context ctx
                                         :cancel-fn cancel-fn)))
         ;; Register cleanup callback on HTTP/2 stream
         (setf (ag-http2:stream-cleanup-callback h2-stream)
@@ -843,8 +843,8 @@ Returns the bidi-stream for chaining."
 After this, no more messages can be sent, but messages can still be received.
 Non-blocking operation - no timeout needed, only context binding.
 Returns the bidi-stream."
-  (let ((ctx (stream-cl-context bidi-stream)))
-    (cl-context:with-context (ctx ctx)
+  (let ((ctx (stream-cancel-context bidi-stream)))
+    (cl-cancel:with-cancel-context (ctx ctx)
       (stream-close-send-internal bidi-stream))))
 
 (defun stream-close-send-internal (bidi-stream)

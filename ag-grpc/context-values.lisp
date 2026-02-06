@@ -1,60 +1,63 @@
-;;;; context-values.lisp - cl-context integration for request-scoped values
+;;;; context-values.lisp - Context values stubs (cl-cancel doesn't support context values)
 
 (in-package #:ag-grpc)
 
 ;;;; ========================================================================
-;;;; Context Keys
+;;;; Context Values - DEPRECATED
 ;;;;
-;;;; These define standard context keys for common request-scoped values.
-;;;; Context values are immutable and propagate automatically through the
-;;;; call stack via cl-context:*current-context*.
+;;;; cl-cancel does not support context values. The Common Lisp idiom
+;;;; is to use dynamic variables (*special-variables*) for request-scoped
+;;;; data instead of Go-style context values.
+;;;;
+;;;; These stubs are provided for backward compatibility but do nothing.
+;;;; If you need request-scoped values, use dynamic variables:
+;;;;
+;;;;   (defvar *grpc-request-id* nil)
+;;;;   (defvar *grpc-trace-context* nil)
+;;;;   (defvar *grpc-auth-token* nil)
+;;;;   (defvar *grpc-peer-address* nil)
+;;;;
+;;;; Then bind them in your handlers:
+;;;;
+;;;;   (let ((*grpc-request-id* (generate-request-id))
+;;;;         (*grpc-peer-address* peer-addr))
+;;;;     ...)
+;;;;
 ;;;; ========================================================================
 
+;; Stub macro - does nothing
+(defmacro define-context-key (name &optional documentation)
+  "DEPRECATED: cl-cancel doesn't support context values. Use dynamic variables instead."
+  (declare (ignore documentation))
+  `(defconstant ,name nil))
+
+;; Define stub context keys
 (define-context-key +grpc-request-id+
-  "Unique request ID for tracing")
+  "Unique request ID for tracing (DEPRECATED - use dynamic variables)")
 
 (define-context-key +grpc-trace-context+
-  "Distributed tracing context (trace-id, span-id)")
+  "Distributed tracing context (DEPRECATED - use dynamic variables)")
 
 (define-context-key +grpc-auth-token+
-  "Authentication token from metadata")
+  "Authentication token (DEPRECATED - use dynamic variables)")
 
 (define-context-key +grpc-peer-address+
-  "Remote peer address")
+  "Remote peer address (DEPRECATED - use dynamic variables)")
 
 ;;;; ========================================================================
-;;;; Context Value Accessors
+;;;; Context Value Accessors (Stubs)
 ;;;; ========================================================================
 
 (defun grpc-context-value (key &optional default)
-  "Get a value from the current gRPC context.
+  "DEPRECATED: cl-cancel doesn't support context values. Use dynamic variables instead.
 
-  Accesses cl-context:*current-context*. Outside of server handlers
-  or client calls, this will use the background context.
-
-  See also: context-metadata (for accessing request headers)"
-  (cl-context:value cl-context:*current-context* key default))
+  Always returns DEFAULT."
+  (declare (ignore key))
+  default)
 
 (defun enrich-context-from-metadata (ctx headers peer-address)
-  "Add request-scoped values to context from headers.
+  "DEPRECATED: cl-cancel doesn't support context values.
 
-  Returns a new context with values added. Use this when creating
-  contexts for incoming requests."
-  (let ((enriched ctx))
-    ;; Add peer address
-    (setf enriched (cl-context:with-value enriched +grpc-peer-address+
-                                          peer-address))
-
-    ;; Extract trace context from headers (if present)
-    (let ((trace-id (cdr (assoc "x-trace-id" headers :test #'string-equal))))
-      (when trace-id
-        (setf enriched (cl-context:with-value enriched +grpc-trace-context+
-                                              trace-id))))
-
-    ;; Extract auth token (if present)
-    (let ((auth (cdr (assoc "authorization" headers :test #'string-equal))))
-      (when auth
-        (setf enriched (cl-context:with-value enriched +grpc-auth-token+
-                                              auth))))
-
-    enriched))
+  Returns CTX unchanged. To store request metadata, use dynamic variables."
+  (declare (ignore headers peer-address))
+  ctx)

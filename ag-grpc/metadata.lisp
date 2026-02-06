@@ -290,11 +290,11 @@ Pseudo-headers (:status) come first per RFC 9113."
 ;;;; ========================================================================
 
 (defun grpc-current-time ()
-  "Get current time in seconds (rational) compatible with cl-context.
+  "Get current time in seconds (rational) compatible with cl-cancel.
 
-  Returns fractional seconds since epoch, using cl-context's time base
+  Returns fractional seconds since epoch, using cl-cancel's time base
   for consistency with deadline tracking."
-  (cl-context:get-current-time))
+  (cl-cancel:get-current-time))
 
 (defun deadline-to-grpc-timeout (deadline)
   "Convert absolute deadline to relative timeout in seconds.

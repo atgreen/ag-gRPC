@@ -44,7 +44,7 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 | Metadata | ✅ | ✅ |
 | Deadlines/Timeouts | ✅ | ✅ |
 | Cancellation | ✅ | ✅ |
-| Context (cl-context) | ✅ | ✅ |
+| Context (cl-cancel) | ✅ | ✅ |
 | Interceptors | ✅ | ✅ |
 | Health Checking | — | ✅ |
 | Reflection | — | ✅ |
@@ -77,7 +77,7 @@ ag-gRPC is tested against the [ConnectRPC conformance suite](https://github.com/
 - Gray stream integration for composable I/O
 - Optional TLS 1.3 support (via pure-tls)
 - **gRPC Server**: handler registration, request context, streaming support
-- **cl-context integration**: cooperative cancellation, deadline enforcement, request-scoped values
+- **cl-cancel integration**: cooperative cancellation, deadline enforcement, request-scoped values
 - **Interceptors**: client and server middleware for logging, auth, metrics
 - **Health checking**: standard grpc.health.v1.Health service
 - **Server reflection**: grpc.reflection.v1alpha for service discovery
@@ -536,24 +536,24 @@ Server handlers can detect when clients cancel RPCs:
 
 ## Timeouts, Deadlines, and Context
 
-ag-gRPC integrates with [cl-context](https://github.com/atgreen/cl-context) for cooperative cancellation, deadline enforcement, and request-scoped values.
+ag-gRPC integrates with [cl-cancel](https://github.com/atgreen/cl-cancel) for cooperative cancellation, deadline enforcement, and request-scoped values.
 
 ### How Timeout Parameters Work
 
 When you pass a `:timeout` parameter to a call function:
 
 ```lisp
-;; Timeout creates a cl-context with deadline internally
+;; Timeout creates a cl-cancel with deadline internally
 (ag-grpc:call-unary channel "/service/Method" request
                     :timeout 5.0)  ; 5 second deadline
 ```
 
 **What happens:**
-1. Creates a `cl-context` with a deadline (current-time + timeout)
+1. Creates a `cl-cancel` with a deadline (current-time + timeout)
 2. Sends `grpc-timeout` header to the server
 3. Uses **layered timeout enforcement**:
    - `bt2:with-timeout` for preemptive interruption (hard deadline)
-   - `cl-context` for cooperative cancellation (graceful checks)
+   - `cl-cancel` for cooperative cancellation (graceful checks)
 4. Maps both timeout mechanisms to `DEADLINE_EXCEEDED` status
 
 ### Timeout Parameter vs. Parent Context
@@ -562,13 +562,13 @@ The `:timeout` parameter **composes** with parent contexts:
 
 ```lisp
 ;; Parent context with 10 second deadline
-(cl-context:with-timeout (cl-context:background) 10.0
+(cl-cancel:with-timeout (cl-cancel:background) 10.0
   ;; Child inherits parent deadline (whichever is sooner)
   (ag-grpc:call-unary channel "/service/Method" request
                       :timeout 5.0))   ; Uses 5s (shorter)
 
 ;; No explicit timeout - inherits parent's deadline
-(cl-context:with-timeout (cl-context:background) 10.0
+(cl-cancel:with-timeout (cl-cancel:background) 10.0
   (ag-grpc:call-unary channel "/service/Method" request))  ; Uses 10s
 ```
 
@@ -598,14 +598,14 @@ ag-gRPC defines standard context keys for request-scoped values:
 
 ### Cooperative Cancellation
 
-Use `cl-context:check-context` for cooperative cancellation in long operations:
+Use `cl-cancel:check-cancellation` for cooperative cancellation in long operations:
 
 ```lisp
 (defun process-batch (items ctx)
   (loop for item in items
         do (progn
              ;; Check for cancellation (deadline or explicit cancel)
-             (cl-context:check-context)
+             (cl-cancel:check-cancellation)
              ;; Do work
              (process-item item))))
 ```
@@ -615,12 +615,12 @@ Use `cl-context:check-context` for cooperative cancellation in long operations:
 ```lisp
 ;; Create cancellable context
 (multiple-value-bind (ctx cancel-fn)
-    (cl-context:with-cancel (cl-context:background))
+    (cl-cancel:with-cancel (cl-cancel:background))
 
   ;; Start operation in background
   (bt2:make-thread
    (lambda ()
-     (cl-context:with-context (ctx ctx)
+     (cl-cancel:with-context (ctx ctx)
        (ag-grpc:call-unary channel "/service/LongOperation" request))))
 
   ;; Cancel after user input
@@ -649,8 +649,8 @@ ag-gRPC maps timeout/cancellation conditions to gRPC status codes:
 | Condition | gRPC Status | When |
 |-----------|-------------|------|
 | `bt2:timeout` | `DEADLINE_EXCEEDED` | Hard timeout reached |
-| `cl-context:context-deadline-exceeded` | `DEADLINE_EXCEEDED` | Cooperative deadline check |
-| `cl-context:context-cancelled` | `CANCELLED` | Explicit cancellation |
+| `cl-cancel:deadline-exceeded` | `DEADLINE_EXCEEDED` | Cooperative deadline check |
+| `cl-cancel:cancelled` | `CANCELLED` | Explicit cancellation |
 | RST_STREAM (error 8) | `CANCELLED` | Network-level cancel |
 
 **Precedence:** Deadline > RST_STREAM > Other cancellation
@@ -1351,7 +1351,7 @@ make interop
 - [ieee-floats](https://github.com/marijnh/ieee-floats) - IEEE 754 float encoding
 - [trivial-gray-streams](https://github.com/trivial-gray-streams/trivial-gray-streams) - Gray stream support
 - [bordeaux-threads](https://github.com/sionescu/bordeaux-threads) - Portable threading (for timeouts)
-- [cl-context](https://github.com/green/cl-context) - Context propagation for cancellation and deadlines
+- [cl-cancel](https://github.com/green/cl-cancel) - Context propagation for cancellation and deadlines
 - [iparse](https://github.com/atgreen/iparse) - Parser combinator library
 - [clingon](https://github.com/dnaeon/clingon) - CLI framework (for ag-protoc)
 - [version-string](https://github.com/atgreen/cl-version-string) - Version string generation
