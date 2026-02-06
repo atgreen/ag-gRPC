@@ -152,4 +152,35 @@ Fix Finding #1: Streaming handlers currently block connection thread by calling
 - Append to buffer instead of stream data buffer
 - Signal condition variable to wake handler
 
-**Status**: Buffer structure complete, need to wire it up
+**Step 3.2: Spawn Handler Threads** ✓
+- Modified server-handle-headers to spawn threads for streaming RPCs
+- Created buffer and stored in connection-stream-buffers
+- Handler runs in separate thread (doesn't block connection)
+
+**Step 3.3: Refactor stream-recv** ✓
+- Replaced connection-read-frame loop with buffer-pop-message
+- Now blocks on condition variable, not frame read
+- Returns nil when buffer closed
+
+**Step 3.4: Update DATA Frame Handling** ✓
+- Decode gRPC messages in connection thread
+- Append to message buffer for streaming RPCs
+- Keep original behavior for unary RPCs
+- Close buffer on END_STREAM
+
+### Testing ✓
+- All 241 tests pass
+- Connection thread no longer blocks on streaming handlers
+- Fixes Finding #1 (multiplexing preserved)
+
+---
+
+## Day 3 Summary
+
+✅ Streaming handlers now run in separate threads
+✅ Connection thread only reads frames and appends to buffers
+✅ `stream-recv` blocks on condition variable (not frame read)
+✅ Message buffers with lock + CV for synchronization
+✅ All 241 tests pass
+
+**Ready to proceed with Day 4: Cleanup + Limits**

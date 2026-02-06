@@ -470,17 +470,26 @@ If GRACEFUL is true, wait for active connections to finish."
                 (when fn
                   (funcall fn)
                   (setf (context-cancel-fn ctx) nil)))))
-      ;; For streaming RPCs, dispatch handler immediately so it can read DATA
-      ;; frames via stream-recv. For unary RPCs, wait for END_STREAM.
+      ;; For streaming RPCs, create message buffer and spawn handler thread.
+      ;; For unary RPCs, wait for END_STREAM.
       (let ((is-streaming (or (handler-client-streaming-p handler)
                               (handler-server-streaming-p handler))))
         (if is-streaming
-            ;; Start streaming handler immediately in main thread
-            ;; (handler's stream-recv will read DATA frames)
-            (handler-case
-                (server-dispatch-handler server conn ctx handler nil)
-              (error (e)
-                (format *error-output* "~&gRPC handler error: ~A~%" e)))
+            ;; Streaming: create buffer and spawn handler thread (fixes Finding #1)
+            (let ((buffer (make-stream-message-buffer)))
+              ;; Store buffer for DATA frame handling
+              (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
+                (setf (gethash stream-id (ag-http2:connection-stream-buffers conn))
+                      buffer))
+              ;; Spawn handler thread (doesn't block connection thread)
+              (bt:make-thread
+               (lambda ()
+                 (handler-case
+                     (server-dispatch-handler server conn ctx handler nil)
+                   (error (e)
+                     (format *error-output* "~&gRPC handler error: ~A~%" e)
+                     (buffer-close buffer e))))
+               :name (format nil "grpc-handler-~D" stream-id)))
             ;; Unary: wait for END_STREAM
             (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
               (server-dispatch-handler server conn ctx handler nil)))))))))
@@ -492,18 +501,49 @@ If GRACEFUL is true, wait for active connections to finish."
                      (ag-http2:connection-multiplexer conn)
                      stream-id))
          (ctx (connection-get-stream-context conn h2-stream))
-         (handler (connection-get-stream-handler conn h2-stream)))
+         (handler (connection-get-stream-handler conn h2-stream))
+         (msg-buffer (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
+                       (gethash stream-id (ag-http2:connection-stream-buffers conn)))))
     (unless (and ctx handler)
       (return-from server-handle-data))
-    ;; Append data to stream buffer
-    (let ((data (ag-http2:frame-payload frame))
-          (buffer (ag-http2:stream-data-buffer h2-stream)))
-      (loop for byte across data
-            do (vector-push-extend byte buffer)))
-    ;; If END_STREAM, process the complete request
-    (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
-      (let ((buffer (ag-http2:stream-data-buffer h2-stream)))
-        (server-dispatch-handler server conn ctx handler buffer)))))
+
+    (if msg-buffer
+        ;; Streaming RPC: decode and append to message buffer
+        (progn
+          ;; Append data to byte buffer for decoding
+          (let ((data (ag-http2:frame-payload frame))
+                (byte-buffer (ag-http2:stream-data-buffer h2-stream))
+                (request-encoding (context-request-encoding ctx)))
+            (loop for byte across data
+                  do (vector-push-extend byte byte-buffer))
+            ;; Try to decode complete messages
+            (loop
+              (multiple-value-bind (msg-data compressed consumed)
+                  (decode-grpc-message byte-buffer 0 request-encoding)
+                (declare (ignore compressed))
+                (unless msg-data
+                  (return)) ; No complete message yet
+                ;; Decode protobuf and append to message buffer
+                (let* ((request-type (handler-request-type handler))
+                       (message (ag-proto:deserialize-from-bytes request-type msg-data)))
+                  (buffer-push-message msg-buffer message))
+                ;; Remove consumed bytes
+                (let ((remaining (subseq byte-buffer consumed)))
+                  (setf (fill-pointer byte-buffer) 0)
+                  (loop for byte across remaining
+                        do (vector-push-extend byte byte-buffer))))))
+          ;; If END_STREAM, close the buffer
+          (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
+            (buffer-close msg-buffer)))
+        ;; Unary RPC: accumulate data and dispatch on END_STREAM
+        (progn
+          (let ((data (ag-http2:frame-payload frame))
+                (buffer (ag-http2:stream-data-buffer h2-stream)))
+            (loop for byte across data
+                  do (vector-push-extend byte buffer)))
+          (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
+            (let ((buffer (ag-http2:stream-data-buffer h2-stream)))
+              (server-dispatch-handler server conn ctx handler buffer)))))))
 
 ;;;; ========================================================================
 ;;;; Handler Dispatch
@@ -723,56 +763,26 @@ If GRACEFUL is true, wait for active connections to finish."
 
 (defun stream-recv (stream)
   "Receive a message from a server stream (for client-streaming/bidi).
-Returns the deserialized message, or NIL if no more messages."
+Returns the deserialized message, or NIL if no more messages.
+Now reads from message buffer (doesn't block connection thread)."
   (when (server-stream-recv-closed-p stream)
     (return-from stream-recv nil))
   (let* ((conn (server-stream-connection stream))
          (stream-id (server-stream-id stream))
-         (h2-stream (ag-http2:multiplexer-get-stream
-                     (ag-http2:connection-multiplexer conn)
-                     stream-id))
-         (buffer (server-stream-recv-buffer stream))
-         (request-encoding (context-request-encoding (server-stream-context stream))))
-    ;; Try to decode from buffer first
-    (multiple-value-bind (data compressed consumed)
-        (decode-grpc-message buffer 0 request-encoding)
-      (declare (ignore compressed))
-      (when data
-        ;; Got a message, remove consumed bytes from buffer
-        (let ((remaining (subseq buffer consumed)))
-          (setf (fill-pointer buffer) 0)
-          (loop for byte across remaining
-                do (vector-push-extend byte buffer)))
-        (return-from stream-recv
-          (ag-proto:deserialize-from-bytes
-           (server-stream-request-type stream) data))))
-    ;; Need more data - read frames
-    (loop
-      (unless (ag-http2:stream-can-recv-p h2-stream)
-        (setf (server-stream-recv-closed-p stream) t)
-        (return-from stream-recv nil))
-      (ag-http2:connection-read-frame conn)
-      ;; Check for client cancellation (RST_STREAM received)
-      (when (ag-http2:stream-rst-stream-error h2-stream)
-        (setf (cancelled-p (server-stream-context stream)) t)
-        (setf (server-stream-recv-closed-p stream) t)
-        (return-from stream-recv nil))
-      ;; Copy new data to our buffer
-      (let ((new-data (ag-http2:stream-consume-data h2-stream)))
-        (loop for byte across new-data
-              do (vector-push-extend byte buffer)))
-      ;; Try to decode
-      (multiple-value-bind (data compressed consumed)
-          (decode-grpc-message buffer 0 request-encoding)
-        (declare (ignore compressed))
-        (when data
-          (let ((remaining (subseq buffer consumed)))
-            (setf (fill-pointer buffer) 0)
-            (loop for byte across remaining
-                  do (vector-push-extend byte buffer)))
-          (return-from stream-recv
-            (ag-proto:deserialize-from-bytes
-             (server-stream-request-type stream) data)))))))
+         (msg-buffer (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
+                       (gethash stream-id (ag-http2:connection-stream-buffers conn)))))
+    (unless msg-buffer
+      ;; No buffer = unary RPC, shouldn't call stream-recv
+      (error "stream-recv called on non-streaming RPC"))
+    ;; Block on buffer until message arrives (or stream closes)
+    (multiple-value-bind (message found-p)
+        (buffer-pop-message msg-buffer)
+      (if found-p
+          message
+          (progn
+            ;; Buffer closed, no more messages
+            (setf (server-stream-recv-closed-p stream) t)
+            nil)))))
 
 (defmacro do-stream-recv ((var stream &optional result) &body body)
   "Iterate over received messages from a stream.
@@ -872,21 +882,21 @@ Example:
 ;;;; Connection thread appends decoded messages, handler threads consume
 
 (defstruct stream-message-buffer
-  "Thread-safe message buffer for streaming RPCs"
+  "Thread-safe message buffer for streaming RPCs.
+Slots:
+- messages: Queue of decoded protobuf messages
+- lock: Protects messages array
+- cv: Condition variable, signals when new message arrives
+- closed-p: T when stream is closed (no more messages)
+- error: Error condition if stream failed"
   (messages (make-array 10 :fill-pointer 0 :adjustable t)
-            :type vector
-            :documentation "Queue of decoded protobuf messages")
+            :type vector)
   (lock (bt:make-lock "stream-buffer-lock")
-        :type bt:lock
-        :documentation "Protects messages array")
-  (cv (bt:make-condition-variable :name "stream-buffer-cv")
-      :type bt:condition-variable
-      :documentation "Signals when new message arrives")
+        :type bt:lock)
+  (cv (bt:make-condition-variable :name "stream-buffer-cv"))
   (closed-p nil
-            :type boolean
-            :documentation "T when stream is closed (no more messages)")
-  (error nil
-         :documentation "Error condition if stream failed"))
+            :type boolean)
+  error)  ; Error condition (or null condition)
 
 (defun buffer-push-message (buffer message)
   "Append a message to the buffer (called by connection thread)"
