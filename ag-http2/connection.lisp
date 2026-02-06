@@ -60,7 +60,19 @@
    (pending-header-stream-id :initform nil :accessor connection-pending-header-stream-id
                               :documentation "Stream ID for pending header block")
    (pending-header-end-stream :initform nil :accessor connection-pending-header-end-stream
-                               :documentation "END_STREAM flag from initial HEADERS frame"))
+                               :documentation "END_STREAM flag from initial HEADERS frame")
+   ;; gRPC-specific state (connection-local to fix thread-safety)
+   (stream-contexts :initform (make-hash-table) :accessor connection-stream-contexts
+                    :documentation "Map of stream → grpc-call-context")
+   (stream-handlers :initform (make-hash-table) :accessor connection-stream-handlers
+                    :documentation "Map of stream → handler function")
+   (stream-buffers :initform (make-hash-table) :accessor connection-stream-buffers
+                   :documentation "Map of stream-id → message buffer")
+   (stream-state-lock :initform (bt:make-lock "stream-state-lock")
+                      :accessor connection-stream-state-lock
+                      :documentation "Lock for stream state maps")
+   (active-streams :initform 0 :accessor connection-active-streams
+                   :documentation "Count of currently active streams"))
   (:documentation "HTTP/2 connection"))
 
 (defun make-client-connection (host port &key tls (verify nil) client-certificate client-key)

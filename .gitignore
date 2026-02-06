@@ -26,3 +26,5 @@ interop/go-server/hello-server
 # Review documentation
 REVIEW.md
 RESPONSE.md
+C-REVIEW.md
+C-RESPONSE.md

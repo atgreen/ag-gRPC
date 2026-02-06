@@ -458,9 +458,9 @@ If GRACEFUL is true, wait for active connections to finish."
           ;; Check if client accepts gzip
           (when (search "gzip" accept-encoding :test #'char-equal)
             (setf (context-response-encoding ctx) "gzip"))))
-      ;; Store context for DATA frame handling
-      (setf (stream-call-context h2-stream) ctx)
-      (setf (stream-handler h2-stream) handler)
+      ;; Store context for DATA frame handling (connection-local, thread-safe)
+      (connection-set-stream-context conn h2-stream ctx)
+      (connection-set-stream-handler conn h2-stream handler)
       ;; Register cleanup callback on HTTP/2 stream
       (setf (ag-http2:stream-cleanup-callback h2-stream)
             (lambda (stream)
@@ -491,8 +491,8 @@ If GRACEFUL is true, wait for active connections to finish."
          (h2-stream (ag-http2:multiplexer-get-stream
                      (ag-http2:connection-multiplexer conn)
                      stream-id))
-         (ctx (stream-call-context h2-stream))
-         (handler (stream-handler h2-stream)))
+         (ctx (connection-get-stream-context conn h2-stream))
+         (handler (connection-get-stream-handler conn h2-stream)))
     (unless (and ctx handler)
       (return-from server-handle-data))
     ;; Append data to stream buffer
@@ -868,24 +868,32 @@ Example:
 ;;; Add slots to store context and handler on HTTP/2 streams
 ;;; These are accessed via methods below
 
-(defvar *stream-contexts* (make-hash-table)
-  "Map of stream -> call context")
+;;;; Connection-local stream state (thread-safe)
+;;;; Replaced global *stream-contexts* and *stream-handlers* to fix
+;;;; thread-safety issue (Finding #2 from code review)
 
-(defvar *stream-handlers* (make-hash-table)
-  "Map of stream -> handler")
+(defun connection-get-stream-context (conn stream)
+  "Get the call context for a stream (thread-safe)"
+  (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
+    (gethash stream (ag-http2:connection-stream-contexts conn))))
 
-(defun stream-call-context (stream)
-  "Get the call context for a stream"
-  (gethash stream *stream-contexts*))
+(defun connection-set-stream-context (conn stream context)
+  "Set the call context for a stream (thread-safe)"
+  (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
+    (setf (gethash stream (ag-http2:connection-stream-contexts conn)) context)))
 
-(defun (setf stream-call-context) (value stream)
-  "Set the call context for a stream"
-  (setf (gethash stream *stream-contexts*) value))
+(defun connection-get-stream-handler (conn stream)
+  "Get the handler for a stream (thread-safe)"
+  (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
+    (gethash stream (ag-http2:connection-stream-handlers conn))))
 
-(defun stream-handler (stream)
-  "Get the handler for a stream"
-  (gethash stream *stream-handlers*))
+(defun connection-set-stream-handler (conn stream handler)
+  "Set the handler for a stream (thread-safe)"
+  (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
+    (setf (gethash stream (ag-http2:connection-stream-handlers conn)) handler)))
 
-(defun (setf stream-handler) (value stream)
-  "Set the handler for a stream"
-  (setf (gethash stream *stream-handlers*) value))
+(defun connection-remove-stream-state (conn stream)
+  "Remove all state for a stream (cleanup on close)"
+  (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
+    (remhash stream (ag-http2:connection-stream-contexts conn))
+    (remhash stream (ag-http2:connection-stream-handlers conn))))

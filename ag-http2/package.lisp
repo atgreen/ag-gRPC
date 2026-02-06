@@ -91,6 +91,11 @@
    #:connection-multiplexer
    #:connection-new-stream
    #:connection-client-p
+   #:connection-stream-contexts
+   #:connection-stream-handlers
+   #:connection-stream-buffers
+   #:connection-stream-state-lock
+   #:connection-active-streams
 
    ;; Server connection
    #:server-connection-handshake
