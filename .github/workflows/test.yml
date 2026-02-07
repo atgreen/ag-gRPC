@@ -1,0 +1,108 @@
+name: Tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }} (SBCL)
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SBCL and ocicl (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          echo "eval \"\$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)\"" >> ~/.bashrc
+          brew install sbcl ocicl
+
+      - name: Install SBCL and ocicl (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install sbcl ocicl
+
+      - name: Install SBCL and ocicl (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          choco install -y sbcl
+          # Pin to v2.14.1 due to regression in later versions
+          Invoke-WebRequest -Uri "https://github.com/ocicl/ocicl/releases/download/v2.14.1/ocicl-2.14.1-windows-amd64.zip" -OutFile "$env:TEMP\ocicl.zip"
+          Expand-Archive -Path "$env:TEMP\ocicl.zip" -DestinationPath "$env:TEMP\ocicl"
+          Copy-Item "$env:TEMP\ocicl\ocicl.exe" -Destination "C:\Windows\System32\"
+
+      - name: Setup ocicl and fetch dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          ocicl setup > ~/.sbclrc
+          ocicl install
+
+      - name: Setup ocicl and fetch dependencies (macOS/Windows)
+        if: runner.os != 'Linux'
+        run: |
+          ocicl setup > ~/.sbclrc
+          ocicl install
+
+      - name: Setup ASDF
+        run: |
+          mkdir -p ~/.config/common-lisp/source-registry.conf.d/
+          echo '(:tree "'"$PWD"'")' > ~/.config/common-lisp/source-registry.conf.d/ag-grpc.conf
+
+      - name: Build system (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          sbcl --non-interactive \
+            --eval '(asdf:load-system :ag-grpc-all/tests)'
+
+      - name: Build system (macOS/Windows)
+        if: runner.os != 'Linux'
+        run: |
+          sbcl --non-interactive \
+            --eval '(asdf:load-system :ag-grpc-all/tests)'
+
+      - name: Run tests (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          sbcl --non-interactive \
+            --eval '(asdf:load-system :ag-grpc-all/tests)' \
+            --eval '(let ((result (ag-grpc-tests:run-tests))) (unless result (uiop:quit 1)))'
+
+      - name: Run tests (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sbcl --non-interactive \
+            --eval '(asdf:load-system :ag-grpc-all/tests)' \
+            --eval '(let ((result (ag-grpc-tests:run-tests))) (unless result (uiop:quit 1)))'
+
+      - name: Run tests (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        run: |
+          sbcl --non-interactive \
+            --eval '(asdf:load-system :ag-grpc-all/tests)' \
+            --eval '(let ((result (ag-grpc-tests:run-tests))) (unless result (uiop:quit 1)))'
