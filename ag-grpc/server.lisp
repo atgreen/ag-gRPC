@@ -982,3 +982,12 @@ Returns: (values message found-p) or (values nil nil) if closed."
   (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
     (remhash stream (ag-http2:connection-stream-contexts conn))
     (remhash stream (ag-http2:connection-stream-handlers conn))))
+
+;;;; ========================================================================
+;;;; Stream Cancel Context Accessor
+;;;; ========================================================================
+
+(defmethod stream-cancel-context ((stream grpc-server-call-stream))
+  "Return the cancel context for a server stream.
+Server streams delegate to their call context."
+  (context-cancel-context (server-stream-context stream)))
