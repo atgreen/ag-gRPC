@@ -112,15 +112,20 @@ For example, setting this to \"PROTO-\" will generate class names like PROTO-FOO
     "METHOD" "STRUCT")
   "CL symbols that should not be used as accessor names (to avoid package lock violations)")
 
-(defun safe-accessor-name (name package)
-  "Generate a safe accessor name, prefixing if it conflicts with CL symbols or if *CLASS-PREFIX* is set"
+(defun safe-accessor-name (name package &optional message-name)
+  "Generate a safe accessor name, prefixing if it conflicts with CL symbols or if *CLASS-PREFIX* is set.
+If MESSAGE-NAME is provided and *CLASS-PREFIX* is set, generates message-specific accessor names
+like PROTO-MESSAGE-FIELD instead of just PROTO-FIELD to avoid naming collisions."
   (let* ((upname (string-upcase (substitute #\- #\_ name)))
          (prefix (or *class-prefix*
                      (when (member upname *cl-reserved-names* :test #'string=)
                        "PROTO-")))
-         (final-name (if prefix
-                         (concatenate 'string prefix upname)
-                         upname)))
+         (final-name (if (and prefix message-name)
+                         ;; When both prefix and message name are provided, create message-specific accessor
+                         (concatenate 'string prefix (lisp-name message-name) "-" upname)
+                         (if prefix
+                             (concatenate 'string prefix upname)
+                             upname))))
     (intern final-name package)))
 
 (defun safe-class-name (name package)
@@ -149,12 +154,13 @@ If PACKAGE is nil, interns in the current package (*PACKAGE*)."
 
 ;;; Slot generation
 
-(defun generate-slot-definition (field &optional package)
-  "Generate a slot definition from a field descriptor"
+(defun generate-slot-definition (field &optional package message-name)
+  "Generate a slot definition from a field descriptor.
+MESSAGE-NAME is the proto message name, used to create message-specific accessor names when *CLASS-PREFIX* is set."
   (let* ((name (proto-field-name field))
          (slot-name (field-name-to-slot-name name))
          (accessor-name (if package
-                            (safe-accessor-name name package)
+                            (safe-accessor-name name package message-name)
                             slot-name))
          (type (proto-field-type field))
          (lisp-type (proto-type-to-lisp-type type))
@@ -490,7 +496,8 @@ ONEOFS is the list of oneof descriptors for the message."
          (class-name (safe-class-name lisp-name-str package))
          (fields (proto-message-fields message-desc))
          (oneofs (proto-message-oneofs message-desc))
-         (field-slots (mapcar (lambda (f) (generate-slot-definition f package)) fields))
+         ;; Pass message name to generate-slot-definition for message-specific accessor names
+         (field-slots (mapcar (lambda (f) (generate-slot-definition f package name)) fields))
          ;; Generate a case slot for each oneof to track which variant is set
          (oneof-case-slots (mapcar (lambda (o) (generate-oneof-case-slot o package)) oneofs))
          (all-slots (append field-slots oneof-case-slots)))
