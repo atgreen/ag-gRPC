@@ -555,7 +555,7 @@ If GRACEFUL is true, wait for active connections to finish."
         ;; Unary RPC: data already appended by process-frame, dispatch on END_STREAM
         (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
           (let ((buffer (ag-http2:stream-data-buffer h2-stream)))
-            (server-dispatch-handler server conn ctx handler buffer)))))))
+            (server-dispatch-handler server conn ctx handler buffer))))))
 
 ;;;; ========================================================================
 ;;;; Handler Dispatch
