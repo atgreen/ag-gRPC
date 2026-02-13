@@ -81,7 +81,11 @@
                     :documentation "Signaled when WINDOW_UPDATE arrives")
    (write-lock :initform (bt2:make-lock :name "h2-write-lock")
                :accessor connection-write-lock
-               :documentation "Serializes frame writes to the wire"))
+               :documentation "Serializes frame writes to the wire")
+   (reader-thread-active-p :initform nil
+                           :accessor connection-reader-thread-active-p
+                           :documentation "When T, a dedicated reader thread processes incoming frames.
+When NIL, connection-send-data reads frames directly when flow control blocks."))
   (:documentation "HTTP/2 connection"))
 
 (defun make-client-connection (host port &key tls (verify nil) client-certificate client-key)
@@ -248,9 +252,18 @@ waking when WINDOW_UPDATE frames arrive."
                               (cs (min cs (stream-remote-window h2-stream))))
                          (if (zerop cs)
                              (progn
-                               (bt2:condition-wait (connection-flow-control-cv conn)
-                                                   (connection-flow-control-lock conn))
-                               0)  ; retry after wake
+                               (if (connection-reader-thread-active-p conn)
+                                   ;; A reader thread will process WINDOW_UPDATE and signal CV
+                                   (bt2:condition-wait (connection-flow-control-cv conn)
+                                                       (connection-flow-control-lock conn))
+                                   ;; No reader thread — read frames directly to get WINDOW_UPDATE
+                                   ;; (safe: we're the only thread on this connection)
+                                   (progn
+                                     (bt2:release-lock (connection-flow-control-lock conn))
+                                     (unwind-protect
+                                          (connection-read-frame conn)
+                                       (bt2:acquire-lock (connection-flow-control-lock conn)))))
+                               0)  ; retry after wake/read
                              (progn
                                ;; Reserve capacity under lock
                                (window-consume (connection-remote-window conn) cs)

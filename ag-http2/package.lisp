@@ -99,6 +99,7 @@
    #:connection-flow-control-lock
    #:connection-flow-control-cv
    #:connection-write-lock
+   #:connection-reader-thread-active-p
 
    ;; Server connection
    #:server-connection-handshake

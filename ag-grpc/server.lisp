@@ -375,6 +375,9 @@ If GRACEFUL is true, wait for active connections to finish."
                             (usocket:get-peer-port client-socket))))
     ;; Perform HTTP/2 handshake
     (ag-http2:server-connection-handshake conn)
+    ;; Server connection loop reads frames on this thread; handler threads
+    ;; send data. Mark reader thread active so flow control uses CV-wait.
+    (setf (ag-http2:connection-reader-thread-active-p conn) t)
     ;; Track connection
     (bt:with-lock-held ((server-connections-lock server))
       (push conn (server-connections server)))
@@ -524,15 +527,13 @@ If GRACEFUL is true, wait for active connections to finish."
       (return-from server-handle-data))
 
     (if msg-buffer
-        ;; Streaming RPC: decode and append to message buffer
+        ;; Streaming RPC: decode messages from stream data buffer.
+        ;; Note: frame data was already appended to the stream's data buffer
+        ;; by process-frame (stream-append-data), so we just decode here.
         (progn
-          ;; Append data to byte buffer for decoding
-          (let ((data (ag-http2:frame-payload frame))
-                (byte-buffer (ag-http2:stream-data-buffer h2-stream))
+          (let ((byte-buffer (ag-http2:stream-data-buffer h2-stream))
                 (request-encoding (context-request-encoding ctx)))
-            (loop for byte across data
-                  do (vector-push-extend byte byte-buffer))
-            ;; Try to decode complete messages
+            ;; Try to decode complete messages from buffer
             (loop
               (multiple-value-bind (msg-data compressed consumed)
                   (decode-grpc-message byte-buffer 0 request-encoding)
@@ -551,15 +552,10 @@ If GRACEFUL is true, wait for active connections to finish."
           ;; If END_STREAM, close the buffer
           (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
             (buffer-close msg-buffer)))
-        ;; Unary RPC: accumulate data and dispatch on END_STREAM
-        (progn
-          (let ((data (ag-http2:frame-payload frame))
-                (buffer (ag-http2:stream-data-buffer h2-stream)))
-            (loop for byte across data
-                  do (vector-push-extend byte buffer)))
-          (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
-            (let ((buffer (ag-http2:stream-data-buffer h2-stream)))
-              (server-dispatch-handler server conn ctx handler buffer)))))))
+        ;; Unary RPC: data already appended by process-frame, dispatch on END_STREAM
+        (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
+          (let ((buffer (ag-http2:stream-data-buffer h2-stream)))
+            (server-dispatch-handler server conn ctx handler buffer)))))))
 
 ;;;; ========================================================================
 ;;;; Handler Dispatch
