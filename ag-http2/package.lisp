@@ -96,6 +96,9 @@
    #:connection-stream-buffers
    #:connection-stream-state-lock
    #:connection-active-streams
+   #:connection-flow-control-lock
+   #:connection-flow-control-cv
+   #:connection-write-lock
 
    ;; Server connection
    #:server-connection-handshake
