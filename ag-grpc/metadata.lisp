@@ -205,7 +205,7 @@ Skips pseudo-headers and standard gRPC headers."
 (defparameter *grpc-content-type* "application/grpc"
   "Standard gRPC content type")
 
-(defparameter *grpc-user-agent* "ag-grpc/1.0.0"
+(defparameter *grpc-user-agent* "ag-grpc/1.1.0"
   "User agent string for this library")
 
 (defparameter *grpc-encoding* "identity"
