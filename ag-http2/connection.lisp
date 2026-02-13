@@ -72,7 +72,20 @@
                       :accessor connection-stream-state-lock
                       :documentation "Lock for stream state maps")
    (active-streams :initform 0 :accessor connection-active-streams
-                   :documentation "Count of currently active streams"))
+                   :documentation "Count of currently active streams")
+   (flow-control-lock :initform (bt2:make-lock :name "flow-control-lock")
+                      :accessor connection-flow-control-lock
+                      :documentation "Protects flow control window reads/writes")
+   (flow-control-cv :initform (bt2:make-condition-variable :name "flow-control-cv")
+                    :accessor connection-flow-control-cv
+                    :documentation "Signaled when WINDOW_UPDATE arrives")
+   (write-lock :initform (bt2:make-lock :name "h2-write-lock")
+               :accessor connection-write-lock
+               :documentation "Serializes frame writes to the wire")
+   (reader-thread-active-p :initform nil
+                           :accessor connection-reader-thread-active-p
+                           :documentation "When T, a dedicated reader thread processes incoming frames.
+When NIL, connection-send-data reads frames directly when flow control blocks."))
   (:documentation "HTTP/2 connection"))
 
 (defun make-client-connection (host port &key tls (verify nil) client-certificate client-key)
@@ -206,8 +219,9 @@ Reads and validates client preface, exchanges SETTINGS frames."
          (frame (make-headers-frame stream-id header-block
                                     :end-stream end-stream
                                     :end-headers t)))
-    (write-frame frame (connection-stream conn))
-    (force-output (connection-stream conn))
+    (bt2:with-lock-held ((connection-write-lock conn))
+      (write-frame frame (connection-stream conn))
+      (force-output (connection-stream conn)))
     (let ((stream (multiplexer-get-stream (connection-multiplexer conn) stream-id)))
       ;; Only transition if stream is idle (server responses on client-initiated
       ;; streams are already open from receiving client headers)
@@ -218,51 +232,68 @@ Reads and validates client preface, exchanges SETTINGS frames."
 
 (defun connection-send-data (conn stream-id data &key end-stream)
   "Send data on a stream.
-Respects MAX_FRAME_SIZE and flow control windows, fragmenting if needed."
+Respects MAX_FRAME_SIZE and flow control windows, fragmenting if needed.
+Blocks on a condition variable when the flow control window is exhausted,
+waking when WINDOW_UPDATE frames arrive."
   (let* ((max-frame-size (or (cdr (assoc +settings-max-frame-size+
                                           (connection-remote-settings conn)))
                              16384))  ; Default per RFC 7540
          (h2-stream (multiplexer-get-stream (connection-multiplexer conn) stream-id))
          (data-length (length data))
          (offset 0))
-    ;; Send data in chunks respecting max frame size and flow control
     (loop while (< offset data-length)
-          do (let* ((remaining (- data-length offset))
-                    ;; Respect max frame size
-                    (chunk-size (min remaining max-frame-size))
-                    ;; Respect connection flow control window
-                    (chunk-size (min chunk-size (window-size (connection-remote-window conn))))
-                    ;; Respect stream flow control window
-                    (chunk-size (min chunk-size (stream-remote-window h2-stream))))
-               (if (zerop chunk-size)
-                   ;; Flow control blocked - wait for WINDOW_UPDATE
-                   (connection-read-frame conn)
-                   ;; Send a chunk
-                   (let* ((chunk (subseq data offset (+ offset chunk-size)))
-                          (is-last (and end-stream (= (+ offset chunk-size) data-length)))
-                          (frame (make-data-frame stream-id chunk :end-stream is-last)))
-                     ;; Consume from flow control windows
-                     (window-consume (connection-remote-window conn) chunk-size)
-                     (decf (stream-remote-window h2-stream) chunk-size)
-                     ;; Send the frame
+          do (when (member (connection-state conn) '(:closing :closed))
+               (return))
+             (let ((chunk-size
+                     (bt2:with-lock-held ((connection-flow-control-lock conn))
+                       (let* ((remaining (- data-length offset))
+                              (cs (min remaining max-frame-size))
+                              (cs (min cs (window-size (connection-remote-window conn))))
+                              (cs (min cs (stream-remote-window h2-stream))))
+                         (if (zerop cs)
+                             (progn
+                               (if (connection-reader-thread-active-p conn)
+                                   ;; A reader thread will process WINDOW_UPDATE and signal CV
+                                   (bt2:condition-wait (connection-flow-control-cv conn)
+                                                       (connection-flow-control-lock conn))
+                                   ;; No reader thread — read frames directly to get WINDOW_UPDATE
+                                   ;; (safe: we're the only thread on this connection)
+                                   (progn
+                                     (bt2:release-lock (connection-flow-control-lock conn))
+                                     (unwind-protect
+                                          (connection-read-frame conn)
+                                       (bt2:acquire-lock (connection-flow-control-lock conn)))))
+                               0)  ; retry after wake/read
+                             (progn
+                               ;; Reserve capacity under lock
+                               (window-consume (connection-remote-window conn) cs)
+                               (decf (stream-remote-window h2-stream) cs)
+                               cs))))))
+               (when (plusp chunk-size)
+                 (let* ((chunk (subseq data offset (+ offset chunk-size)))
+                        (is-last (and end-stream (= (+ offset chunk-size) data-length)))
+                        (frame (make-data-frame stream-id chunk :end-stream is-last)))
+                   (bt2:with-lock-held ((connection-write-lock conn))
                      (write-frame frame (connection-stream conn))
-                     (force-output (connection-stream conn))
-                     (incf offset chunk-size)
-                     (when is-last
-                       (stream-transition h2-stream :send-end-stream))))))
+                     (force-output (connection-stream conn)))
+                   (incf offset chunk-size)
+                   (when is-last
+                     (stream-transition h2-stream :send-end-stream))))))
     ;; Handle case where data was empty but end-stream is requested
     (when (and end-stream (zerop data-length))
       (let ((frame (make-data-frame stream-id data :end-stream t)))
-        (write-frame frame (connection-stream conn))
-        (force-output (connection-stream conn))
+        (bt2:with-lock-held ((connection-write-lock conn))
+          (write-frame frame (connection-stream conn))
+          (force-output (connection-stream conn)))
         (stream-transition h2-stream :send-end-stream)))))
 
 (defun connection-send-rst-stream (conn stream-id error-code)
   "Send a RST_STREAM frame to immediately terminate a stream.
 ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation)."
   (let ((frame (make-rst-stream-frame stream-id error-code)))
-    (write-frame frame (connection-stream conn))
-    (force-output (connection-stream conn))
+    (bt2:with-lock-held ((connection-write-lock conn))
+      (write-frame frame (connection-stream conn))
+      (force-output (connection-stream conn)))
     ;; Close the stream locally
     (multiplexer-close-stream (connection-multiplexer conn) stream-id)))
 
@@ -284,23 +315,27 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
      (unless (plusp (logand (frame-flags frame) +flag-ack+))
        ;; Not an ACK, apply settings and send ACK
        (apply-remote-settings conn (settings-frame-settings frame))
-       (write-frame (make-settings-frame :ack t) (connection-stream conn))
-       (force-output (connection-stream conn))))
+       (bt2:with-lock-held ((connection-write-lock conn))
+         (write-frame (make-settings-frame :ack t) (connection-stream conn))
+         (force-output (connection-stream conn)))))
     (ping-frame
      (unless (plusp (logand (frame-flags frame) +flag-ack+))
        ;; Not an ACK, send response
-       (write-frame (make-ping-frame (ping-frame-opaque-data frame) :ack t)
-                    (connection-stream conn))
-       (force-output (connection-stream conn))))
+       (bt2:with-lock-held ((connection-write-lock conn))
+         (write-frame (make-ping-frame (ping-frame-opaque-data frame) :ack t)
+                      (connection-stream conn))
+         (force-output (connection-stream conn)))))
     (goaway-frame
      (setf (connection-state conn) :closing))
     (window-update-frame
      (let ((increment (window-update-frame-window-size-increment frame))
            (stream-id (frame-stream-id frame)))
-       (if (zerop stream-id)
-           (window-increment (connection-remote-window conn) increment)
-           (let ((stream (multiplexer-get-stream (connection-multiplexer conn) stream-id)))
-             (incf (stream-remote-window stream) increment)))))
+       (bt2:with-lock-held ((connection-flow-control-lock conn))
+         (if (zerop stream-id)
+             (window-increment (connection-remote-window conn) increment)
+             (let ((stream (multiplexer-get-stream (connection-multiplexer conn) stream-id)))
+               (incf (stream-remote-window stream) increment))))
+       (bt2:condition-broadcast (connection-flow-control-cv conn))))
     (headers-frame
      (let* ((stream-id (frame-stream-id frame))
             (stream (multiplexer-get-stream (connection-multiplexer conn) stream-id))
@@ -373,11 +408,11 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
          ;; Consume from local windows
          (decf (window-size (connection-local-window conn)) data-length)
          (decf (stream-local-window stream) data-length)
-         ;; Send WINDOW_UPDATE to replenish connection window
-         (write-frame (make-window-update-frame 0 data-length) (connection-stream conn))
-         ;; Send WINDOW_UPDATE to replenish stream window
-         (write-frame (make-window-update-frame stream-id data-length) (connection-stream conn))
-         (force-output (connection-stream conn))
+         ;; Send WINDOW_UPDATE to replenish connection and stream windows
+         (bt2:with-lock-held ((connection-write-lock conn))
+           (write-frame (make-window-update-frame 0 data-length) (connection-stream conn))
+           (write-frame (make-window-update-frame stream-id data-length) (connection-stream conn))
+           (force-output (connection-stream conn)))
          ;; Restore local windows
          (incf (window-size (connection-local-window conn)) data-length)
          (incf (stream-local-window stream) data-length))
@@ -407,14 +442,17 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
          (when callback
            (funcall callback stream))))
      (multiplexer-streams mux)))
-  ;; Now close the connection
+  ;; Set closing state BEFORE broadcast so woken senders see it
   (when (eq (connection-state conn) :open)
     (setf (connection-state conn) :closing)
-    (write-frame (make-goaway-frame (connection-last-stream-id conn)
-                                    error-code
-                                    debug-data)
-                 (connection-stream conn))
-    (force-output (connection-stream conn)))
+    ;; Wake any senders blocked on flow control so they can exit
+    (bt2:condition-broadcast (connection-flow-control-cv conn))
+    (bt2:with-lock-held ((connection-write-lock conn))
+      (write-frame (make-goaway-frame (connection-last-stream-id conn)
+                                      error-code
+                                      debug-data)
+                   (connection-stream conn))
+      (force-output (connection-stream conn))))
   (setf (connection-state conn) :closed)
   (usocket:socket-close (connection-socket conn)))
 

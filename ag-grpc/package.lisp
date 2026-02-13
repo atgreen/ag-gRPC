@@ -64,6 +64,7 @@
    ;; Channel
    #:grpc-channel
    #:make-channel
+   #:channel-connection
    #:make-secure-channel
    #:channel-close
    #:channel-tls-p

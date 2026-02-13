@@ -6,7 +6,7 @@
   :license "MIT"
   :version "1.0.0"
   :serial t
-  :depends-on (#:usocket #:trivial-utf-8)
+  :depends-on (#:usocket #:trivial-utf-8 #:bordeaux-threads)
   :pathname "ag-http2"
   :components ((:file "package")
                (:file "constants")
