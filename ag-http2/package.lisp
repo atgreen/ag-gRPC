@@ -64,6 +64,7 @@
 
    ;; Frame creation
    #:make-rst-stream-frame
+   #:make-ping-frame
 
    ;; Stream states
    #:http2-stream
@@ -87,6 +88,7 @@
    #:http2-frame-error
 
    ;; Connection accessors
+   #:connection-stream
    #:connection-state
    #:connection-multiplexer
    #:connection-new-stream

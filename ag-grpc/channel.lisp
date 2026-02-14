@@ -40,19 +40,26 @@
              :documentation "Default metadata for all calls")
    (interceptors :initarg :interceptors :accessor channel-interceptors
                  :initform nil
-                 :documentation "List of client interceptors"))
+                 :documentation "List of client interceptors")
+   (keepalive :initarg :keepalive :accessor channel-keepalive
+              :initform nil
+              :documentation "Keepalive configuration (keepalive-config instance)")
+   (keepalive-thread :initform nil :accessor channel-keepalive-thread
+                     :documentation "Background thread sending HTTP/2 PING frames"))
   (:documentation "gRPC client channel"))
 
 (defun make-channel (host port &key (connect t) (timeout 30 timeout-supplied-p) metadata
                                       tls (tls-verify nil)
-                                      tls-client-certificate tls-client-key)
+                                      tls-client-certificate tls-client-key
+                                      keepalive)
   "Create a new gRPC channel to a server.
 If CONNECT is true (default), immediately establish the connection.
 TIMEOUT - Default timeout in seconds. Pass NIL to disable default timeout.
 If TLS is true, use TLS encryption.
 If TLS-VERIFY is true, verify server certificates.
 TLS-CLIENT-CERTIFICATE - Path to client certificate for mTLS.
-TLS-CLIENT-KEY - Path to client private key for mTLS."
+TLS-CLIENT-KEY - Path to client private key for mTLS.
+KEEPALIVE - A keepalive-config instance for HTTP/2 PING keepalive."
   (let ((channel (make-instance 'grpc-channel
                                 :host host
                                 :port port
@@ -61,7 +68,8 @@ TLS-CLIENT-KEY - Path to client private key for mTLS."
                                 :tls-client-certificate tls-client-certificate
                                 :tls-client-key tls-client-key
                                 :default-timeout (if timeout-supplied-p timeout 30)
-                                :metadata metadata)))
+                                :metadata metadata
+                                :keepalive keepalive)))
     (when connect
       (channel-connect channel))
     channel))
@@ -90,7 +98,8 @@ CLIENT-CERTIFICATE and CLIENT-KEY enable mTLS client authentication."
            :tls (channel-tls channel)
            :verify (channel-tls-verify channel)
            :client-certificate (channel-tls-client-certificate channel)
-           :client-key (channel-tls-client-key channel)))))
+           :client-key (channel-tls-client-key channel)))
+    (channel-start-keepalive channel)))
 
 (defun channel-connected-p (channel)
   "Return T if the channel has an active connection"
@@ -99,9 +108,48 @@ CLIENT-CERTIFICATE and CLIENT-KEY enable mTLS client authentication."
 
 (defun channel-close (channel)
   "Close the channel and its connection"
+  (channel-stop-keepalive channel)
   (when (channel-connection channel)
     (ag-http2:connection-close (channel-connection channel))
     (setf (channel-connection channel) nil)))
+
+;;;; ========================================================================
+;;;; Keepalive
+;;;; ========================================================================
+
+(defun channel-start-keepalive (channel)
+  "Start the keepalive thread if a keepalive config is set on CHANNEL.
+Sends HTTP/2 PING frames at the configured interval to keep the
+connection alive through NAT/firewalls and detect dead connections."
+  (let ((config (channel-keepalive channel)))
+    (when config
+      (let ((interval (keepalive-ping-interval config))
+            (conn (channel-connection channel)))
+        (setf (channel-keepalive-thread channel)
+              (bt:make-thread
+               (lambda ()
+                 (handler-case
+                     (loop while (and (channel-keepalive-thread channel)
+                                      conn
+                                      (eq (ag-http2:connection-state conn) :open))
+                           do (sleep interval)
+                              (when (and (channel-keepalive-thread channel)
+                                         (eq (ag-http2:connection-state conn) :open))
+                                (bt2:with-lock-held ((ag-http2:connection-write-lock conn))
+                                  (ag-http2:write-frame
+                                   (ag-http2:make-ping-frame
+                                    (make-array 8 :element-type '(unsigned-byte 8)
+                                                  :initial-element 0))
+                                   (ag-http2:connection-stream conn))
+                                  (force-output (ag-http2:connection-stream conn)))))
+                   (error () nil)))
+               :name "grpc-keepalive"))))))
+
+(defun channel-stop-keepalive (channel)
+  "Stop the keepalive thread for CHANNEL."
+  (let ((thread (channel-keepalive-thread channel)))
+    (when thread
+      (setf (channel-keepalive-thread channel) nil))))
 
 ;;;; ========================================================================
 ;;;; Channel Configuration
