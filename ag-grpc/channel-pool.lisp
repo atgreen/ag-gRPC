@@ -102,11 +102,20 @@ PERMIT-WITHOUT-CALLS: Send pings even when idle (default NIL)"
 
 (defun channel-ping (channel)
   "Send a PING frame on the channel's HTTP/2 connection.
-Returns T if ping was sent successfully, NIL otherwise.
-Note: Currently checks connection state only; actual PING frames
-require HTTP/2 layer support."
-  (and (channel-connection channel)
-       (channel-connected-p channel)))
+Returns T if ping was sent successfully, NIL otherwise."
+  (let ((conn (channel-connection channel)))
+    (when (and conn (eq (ag-http2:connection-state conn) :open))
+      (handler-case
+          (progn
+            (bt2:with-lock-held ((ag-http2:connection-write-lock conn))
+              (ag-http2:write-frame
+               (ag-http2:make-ping-frame
+                (make-array 8 :element-type '(unsigned-byte 8)
+                              :initial-element 0))
+               (ag-http2:connection-stream conn))
+              (force-output (ag-http2:connection-stream conn)))
+            t)
+        (error () nil)))))
 
 (defun channel-check-health (channel &key (timeout 5))
   "Check channel health.
