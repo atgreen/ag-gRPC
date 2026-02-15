@@ -58,13 +58,13 @@ jobs:
         run: |
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
           ocicl setup > ~/.sbclrc
-          ocicl install
+          ocicl install iparse trivial-utf-8 ieee-floats trivial-gray-streams usocket bordeaux-threads version-string chipz salza2 cl-cancel fiveam pure-tls
 
       - name: Setup ocicl and fetch dependencies (macOS/Windows)
         if: runner.os != 'Linux'
         run: |
           ocicl setup > ~/.sbclrc
-          ocicl install
+          ocicl install iparse trivial-utf-8 ieee-floats trivial-gray-streams usocket bordeaux-threads version-string chipz salza2 cl-cancel fiveam pure-tls
 
       - name: Setup ASDF
         run: |
