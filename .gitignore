@@ -11,6 +11,7 @@
 
 # ocicl dependencies
 ocicl/
+ocicl.csv
 
 # Build artifacts
 ag-protoc
