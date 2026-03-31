@@ -18,9 +18,10 @@
    (tls :initarg :tls :accessor channel-tls
         :initform nil
         :documentation "Use TLS encryption")
+   ;; CLSEC-2026-0003: Default to verifying TLS certificates
    (tls-verify :initarg :tls-verify :accessor channel-tls-verify
-               :initform nil
-               :documentation "Verify TLS certificates")
+               :initform t
+               :documentation "Verify TLS certificates (default: T)")
    (tls-client-certificate :initarg :tls-client-certificate
                            :accessor channel-tls-client-certificate
                            :initform nil
@@ -49,14 +50,14 @@
   (:documentation "gRPC client channel"))
 
 (defun make-channel (host port &key (connect t) (timeout 30 timeout-supplied-p) metadata
-                                      tls (tls-verify nil)
+                                      tls (tls-verify t)
                                       tls-client-certificate tls-client-key
                                       keepalive)
   "Create a new gRPC channel to a server.
 If CONNECT is true (default), immediately establish the connection.
 TIMEOUT - Default timeout in seconds. Pass NIL to disable default timeout.
 If TLS is true, use TLS encryption.
-If TLS-VERIFY is true, verify server certificates.
+TLS-VERIFY defaults to T; set to NIL to disable certificate verification.
 TLS-CLIENT-CERTIFICATE - Path to client certificate for mTLS.
 TLS-CLIENT-KEY - Path to client private key for mTLS.
 KEEPALIVE - A keepalive-config instance for HTTP/2 PING keepalive."
@@ -74,7 +75,7 @@ KEEPALIVE - A keepalive-config instance for HTTP/2 PING keepalive."
       (channel-connect channel))
     channel))
 
-(defun make-secure-channel (host port &key (connect t) timeout metadata (verify nil)
+(defun make-secure-channel (host port &key (connect t) timeout metadata (verify t)
                                            client-certificate client-key)
   "Create a new gRPC channel with TLS encryption.
 Convenience function equivalent to (make-channel ... :tls t).
