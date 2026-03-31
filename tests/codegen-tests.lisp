@@ -186,3 +186,52 @@ message Small {
     ;; Should deserialize without error, ignoring unknown field
     (let ((restored (ag-proto:deserialize-from-bytes 'small extra-bytes)))
       (is (= 100 (a restored))))))
+
+(test codegen-map-field-string-string
+  "Generate and roundtrip message with map<string, string> field"
+  (ag-proto:compile-proto-string "
+syntax = \"proto3\";
+message TaggedItem {
+  string name = 1;
+  map<string, string> tags = 2;
+}")
+  ;; Test with data
+  (let* ((original (make-instance 'tagged-item
+                                  :name "test"
+                                  :tags '(("env" . "prod") ("team" . "backend"))))
+         (bytes (ag-proto:serialize-to-bytes original))
+         (restored (ag-proto:deserialize-from-bytes 'tagged-item bytes)))
+    (is (string= "test" (name restored)))
+    (is (= 2 (length (tags restored))))
+    (is (string= "prod" (cdr (assoc "env" (tags restored) :test #'string=))))
+    (is (string= "backend" (cdr (assoc "team" (tags restored) :test #'string=))))))
+
+(test codegen-map-field-empty
+  "Map field defaults to nil (empty)"
+  (ag-proto:compile-proto-string "
+syntax = \"proto3\";
+message EmptyMap {
+  map<string, string> data = 1;
+}")
+  (let ((msg (make-instance 'empty-map)))
+    (is (null (data msg))))
+  ;; Roundtrip empty map
+  (let* ((original (make-instance 'empty-map))
+         (bytes (ag-proto:serialize-to-bytes original))
+         (restored (ag-proto:deserialize-from-bytes 'empty-map bytes)))
+    (is (null (data restored)))))
+
+(test codegen-map-field-int-string
+  "Generate and roundtrip message with map<int32, string> field"
+  (ag-proto:compile-proto-string "
+syntax = \"proto3\";
+message IntMap {
+  map<int32, string> items = 1;
+}")
+  (let* ((original (make-instance 'int-map :items '((1 . "one") (2 . "two") (3 . "three"))))
+         (bytes (ag-proto:serialize-to-bytes original))
+         (restored (ag-proto:deserialize-from-bytes 'int-map bytes)))
+    (is (= 3 (length (items restored))))
+    (is (string= "one" (cdr (assoc 1 (items restored)))))
+    (is (string= "two" (cdr (assoc 2 (items restored)))))
+    (is (string= "three" (cdr (assoc 3 (items restored)))))))

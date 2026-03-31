@@ -88,6 +88,10 @@
    #:proto-field-default-value
    #:proto-field-options
 
+   ;; Map field accessors
+   #:proto-field-map-key-type
+   #:proto-field-map-value-type
+
    ;; Enum descriptor accessors
    #:proto-enum-name
    #:proto-enum-full-name

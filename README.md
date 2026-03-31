@@ -1304,7 +1304,7 @@ Protocol Buffers implementation:
 - Wire format encoding/decoding (varints, fixed types, length-delimited)
 - Proto3 .proto file parser
 - CLOS class generation with `serialize-to-bytes` and `deserialize-from-bytes` methods
-- Support for all scalar types, nested messages, enums, and repeated fields
+- Support for all scalar types, nested messages, enums, repeated fields, and map fields
 - **Client stub generation** from service definitions (e.g., `Greeter` → `greeter-stub` class with `greeter-say-hello` method)
 - **Gray stream support** for composable serialization (`sequence-input-stream`, `sequence-output-stream`)
 

@@ -260,6 +260,8 @@
            (push (transform-enum child full-name) (proto-message-nested-enums msg-desc)))
           (:oneof
            (push (transform-oneof child msg-desc) (proto-message-oneofs msg-desc)))
+          (:mapField
+           (push (transform-map-field child) (proto-message-fields msg-desc)))
           (:option
            (push (transform-option child) (proto-message-options msg-desc))))))
     ;; Reverse to maintain order
@@ -320,6 +322,46 @@
     (setf (proto-field-number field-desc) (or number 0))
     (setf (proto-field-type field-desc) (or type :unknown))
     (setf (proto-field-label field-desc) (or label :optional))
+    field-desc))
+
+(defun extract-key-type (node)
+  "Extract key type from a keyType node"
+  (dolist (child (cdr node))
+    (when (stringp child)
+      (return-from extract-key-type (intern (string-upcase child) :keyword))))
+  :string)
+
+(defun transform-map-field (node)
+  "Transform a mapField parse node into a proto-field-descriptor with map-key-type and map-value-type set."
+  (let ((field-desc (make-instance 'proto-field-descriptor))
+        (key-type nil)
+        (value-type nil)
+        (name nil)
+        (number nil))
+    (dolist (child (cdr node))
+      (cond
+        ((and (consp child) (eq (car child) :keyType))
+         (setf key-type (extract-key-type child)))
+        ((and (consp child) (eq (car child) :type))
+         (setf value-type (extract-type child)))
+        ((and (consp child) (eq (car child) :mapName))
+         (setf name (find-name-in-node child)))
+        ((and (consp child) (eq (car child) :fieldNumber))
+         (setf number (extract-int-value child)))
+        ;; Handle bare strings that could be key types or value types
+        ((stringp child)
+         (cond
+           ((member child '("int32" "int64" "uint32" "uint64" "sint32" "sint64"
+                            "fixed32" "fixed64" "sfixed32" "sfixed64" "bool" "string") :test #'string=)
+            (cond ((null key-type) (setf key-type (intern (string-upcase child) :keyword)))
+                  ((null value-type) (setf value-type (intern (string-upcase child) :keyword)))))
+           ((null name) (setf name child))))))
+    (setf (proto-field-name field-desc) (or name "unknown"))
+    (setf (proto-field-number field-desc) (or number 0))
+    (setf (proto-field-type field-desc) :map)
+    (setf (proto-field-label field-desc) :optional)
+    (setf (proto-field-map-key-type field-desc) (or key-type :string))
+    (setf (proto-field-map-value-type field-desc) (or value-type :string))
     field-desc))
 
 (defun extract-type (node)

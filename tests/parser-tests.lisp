@@ -182,3 +182,29 @@ message AllTypes {
       (is (eq :double (ag-proto:proto-field-type (find "d" fields :key #'ag-proto:proto-field-name :test #'string=))))
       (is (eq :string (ag-proto:proto-field-type (find "s" fields :key #'ag-proto:proto-field-name :test #'string=))))
       (is (eq :bytes (ag-proto:proto-field-type (find "by" fields :key #'ag-proto:proto-field-name :test #'string=)))))))
+
+(test parse-map-field
+  "Parse a message with map fields"
+  (let* ((proto "syntax = \"proto3\";
+message Config {
+  string name = 1;
+  map<string, string> labels = 2;
+  map<int32, bool> flags = 3;
+}")
+         (file-desc (ag-proto:parse-proto-string proto)))
+    (is (not (null file-desc)))
+    (let* ((msg (first (ag-proto:proto-file-messages file-desc)))
+           (fields (ag-proto:proto-message-fields msg)))
+      (is (= 3 (length fields)))
+      ;; Check the string->string map field
+      (let ((labels-field (find "labels" fields :key #'ag-proto:proto-field-name :test #'string=)))
+        (is (not (null labels-field)))
+        (is (eq :string (ag-proto:proto-field-map-key-type labels-field)))
+        (is (eq :string (ag-proto:proto-field-map-value-type labels-field)))
+        (is (= 2 (ag-proto:proto-field-number labels-field))))
+      ;; Check the int32->bool map field
+      (let ((flags-field (find "flags" fields :key #'ag-proto:proto-field-name :test #'string=)))
+        (is (not (null flags-field)))
+        (is (eq :int32 (ag-proto:proto-field-map-key-type flags-field)))
+        (is (eq :bool (ag-proto:proto-field-map-value-type flags-field)))
+        (is (= 3 (ag-proto:proto-field-number flags-field)))))))
