@@ -4,7 +4,7 @@
 
 ## Security Fixes
 
-### CLSEC-2026-0003 — TLS certificate verification disabled by default (HIGH)
+### CL-SEC-2026-0003 — TLS certificate verification disabled by default (HIGH)
 
 `make-channel` with `:tls t` and `make-secure-channel` both defaulted
 `:tls-verify` / `:verify` to NIL, meaning TLS connections did not

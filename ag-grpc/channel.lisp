@@ -18,7 +18,7 @@
    (tls :initarg :tls :accessor channel-tls
         :initform nil
         :documentation "Use TLS encryption")
-   ;; CLSEC-2026-0003: Default to verifying TLS certificates
+   ;; CL-SEC-2026-0003: Default to verifying TLS certificates
    (tls-verify :initarg :tls-verify :accessor channel-tls-verify
                :initform t
                :documentation "Verify TLS certificates (default: T)")
