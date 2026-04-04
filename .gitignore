@@ -19,6 +19,7 @@ ag-protoc
 
 # Go build artifacts
 interop/go-server/hello-server
+interop/interop-server
 
 # IDE
 .vscode/
