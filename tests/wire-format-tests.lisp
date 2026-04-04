@@ -229,3 +229,60 @@
         (multiple-value-bind (decoded-field decoded-wire) (ag-proto:parse-field-tag tag)
           (is (= field-num decoded-field))
           (is (= wire-type decoded-wire)))))))
+
+;;;; ========================================================================
+;;;; Security Limit Tests (CL-SEC-2026-0004)
+;;;; ========================================================================
+
+(test max-message-size-rejects-oversized-length-delimited
+  "decode-length-delimited signals error when length exceeds *max-message-size*"
+  (let ((ag-proto:*max-message-size* 8))
+    ;; Build a byte vector: varint length=9 followed by 9 data bytes
+    (let ((bytes (coerce (append (ag-proto:encode-varint 9)
+                                 (make-list 9 :initial-element 0))
+                         'vector)))
+      (signals ag-proto:wire-format-error
+        (ag-proto:decode-length-delimited bytes)))))
+
+(test max-message-size-allows-fitting-length-delimited
+  "decode-length-delimited succeeds when length is within *max-message-size*"
+  (let ((ag-proto:*max-message-size* 8))
+    (let ((bytes (coerce (append (ag-proto:encode-varint 8)
+                                 (make-list 8 :initial-element 42))
+                         'vector)))
+      (let ((data (ag-proto:decode-length-delimited bytes)))
+        (is (= 8 (length data)))))))
+
+(test max-message-size-rejects-oversized-stream
+  "decode-length-delimited-from-stream signals error when length exceeds limit"
+  (let ((ag-proto:*max-message-size* 4))
+    (let ((bytes (coerce (append (ag-proto:encode-varint 5)
+                                 (make-list 5 :initial-element 0))
+                         'vector)))
+      (ag-proto:with-input-from-sequence (s bytes)
+        (signals ag-proto:wire-format-error
+          (ag-proto:decode-length-delimited-from-stream s))))))
+
+(test max-message-size-nil-disables-check
+  "Setting *max-message-size* to NIL disables the size check"
+  (let ((ag-proto:*max-message-size* nil))
+    ;; A large length value in the varint but only a small byte vector;
+    ;; we just verify no size error is signalled (read-sequence will
+    ;; silently short-read).
+    (let ((bytes (coerce (append (ag-proto:encode-varint 1024)
+                                 (make-list 1024 :initial-element 0))
+                         'vector)))
+      (ag-proto:with-input-from-sequence (s bytes)
+        (let ((data (ag-proto:decode-length-delimited-from-stream s)))
+          (is (= 1024 (length data))))))))
+
+(test field-tag-stream-varint-overflow
+  "decode-field-tag-from-stream signals error on varint > 10 bytes"
+  ;; 11 bytes each with continuation bit set, followed by a terminator —
+  ;; this exceeds the 10-byte / 63-bit varint limit.
+  (let ((bytes (coerce (append (make-list 11 :initial-element #x80)
+                               (list #x01))
+                       'vector)))
+    (ag-proto:with-input-from-sequence (s bytes)
+      (signals ag-proto:wire-format-error
+        (ag-proto:decode-field-tag-from-stream s)))))

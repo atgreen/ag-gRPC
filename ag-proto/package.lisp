@@ -46,6 +46,7 @@
    #:parse-field-tag
    #:encode-field-tag
    #:decode-field-tag
+   #:decode-field-tag-from-stream
    #:+wire-type-varint+
    #:+wire-type-fixed64+
    #:+wire-type-length-delimited+
@@ -162,4 +163,7 @@
    ;; Conditions
    #:proto-error
    #:wire-format-error
-   #:proto-parse-error))
+   #:proto-parse-error
+
+   ;; Security limits
+   #:*max-message-size*))

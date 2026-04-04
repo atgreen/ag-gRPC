@@ -29,6 +29,11 @@
              (format stream "Wire format error: ~A"
                      (wire-format-error-message condition)))))
 
+(defvar *max-message-size* (* 64 1024 1024)
+  "Maximum allowed size in bytes for a single length-delimited field
+(string, bytes, or embedded message).  Set to NIL to disable the check.
+Default: 64 MB.  CL-SEC-2026-0004.")
+
 ;;;; ========================================================================
 ;;;; Varint Encoding/Decoding (LEB128)
 ;;;; ========================================================================
@@ -285,6 +290,10 @@ Returns a list of bytes (length varint followed by data)."
   "Decode a length-delimited field from bytes.
 Returns (values data-bytes total-bytes-consumed)."
   (multiple-value-bind (length varint-size) (decode-varint bytes start)
+    (when (and *max-message-size* (> length *max-message-size*))
+      (error 'wire-format-error
+             :message (format nil "Length-delimited field size ~D exceeds maximum allowed size ~D"
+                              length *max-message-size*)))
     (let* ((data-start (+ start varint-size))
            (data-end (+ data-start length))
            (data (subseq bytes data-start data-end)))
@@ -293,10 +302,14 @@ Returns (values data-bytes total-bytes-consumed)."
 (defun decode-length-delimited-from-stream (stream)
   "Decode a length-delimited field from a stream.
 Returns the data as a byte vector."
-  (let* ((length (decode-varint-from-stream stream))
-         (data (make-array length :element-type '(unsigned-byte 8))))
-    (read-sequence data stream)
-    data))
+  (let* ((length (decode-varint-from-stream stream)))
+    (when (and *max-message-size* (> length *max-message-size*))
+      (error 'wire-format-error
+             :message (format nil "Length-delimited field size ~D exceeds maximum allowed size ~D"
+                              length *max-message-size*)))
+    (let ((data (make-array length :element-type '(unsigned-byte 8))))
+      (read-sequence data stream)
+      data)))
 
 ;;;; ========================================================================
 ;;;; String Encoding (UTF-8)
@@ -371,6 +384,9 @@ Returns (values field-number wire-type) or NIL on EOF."
                        (loop for byte = (read-byte stream)
                              do (setf result (logior result (ash (logand byte #x7f) shift)))
                                 (incf shift 7)
+                             when (> shift 63)
+                               do (error 'wire-format-error
+                                         :message "Varint too long (> 10 bytes)")
                              until (zerop (logand byte #x80)))
                        result))))
         (parse-field-tag tag)))))

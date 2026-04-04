@@ -34,12 +34,12 @@
 ;; Test unary RPC
 (defun test-unary (channel)
   (format t "~&~%=== Test 1: Unary RPC ===~%")
-  (let ((request (make-instance 'hellorequest :name "World")))
+  (let ((request (make-instance 'hello-request :name "World")))
     (format t "~&Sending HelloRequest with name='World'...~%")
     (let ((call (ag-grpc:call-unary channel
                                     "/hello.Greeter/SayHello"
                                     request
-                                    :response-type 'helloreply)))
+                                    :response-type 'hello-reply)))
       (format t "~&Response received!~%")
       (format t "~&  Status: ~A~%" (ag-grpc:call-status call))
       (format t "~&  Message: ~A~%" (message (ag-grpc:call-response call)))
@@ -48,20 +48,21 @@
 ;; Test server streaming RPC
 (defun test-server-streaming (channel)
   (format t "~&~%=== Test 2: Server Streaming RPC ===~%")
-  (let ((request (make-instance 'hellorequest :name "Stream" :count 3)))
+  (let ((request (make-instance 'hello-request :name "Stream" :count 3)))
     (format t "~&Sending HelloRequest with name='Stream', count=3...~%")
-    (let* ((stream (ag-grpc:call-server-streaming channel
-                                                   "/hello.Greeter/SayHelloStream"
-                                                   request
-                                                   :response-type 'helloreply))
+    (let* ((stream (ag-grpc:call-server-stream channel
+                                                  "/hello.Greeter/SayHelloStream"
+                                                  request
+                                                  :response-type 'hello-reply))
            (message-count 0))
       ;; Read all messages from the stream
-      (ag-grpc:do-stream-messages (reply stream)
-        (incf message-count)
-        (format t "~&  [~A] ~A~%" (index reply) (message reply)))
-      (format t "~&Stream finished. Status: ~A~%" (ag-grpc:stream-status stream))
+      (loop for reply = (ag-grpc:stream-receive-message stream)
+            while reply
+            do (incf message-count)
+               (format t "~&  [~A] ~A~%" (index reply) (message reply)))
+      (format t "~&Stream finished. Status: ~A~%" (ag-grpc:stream-call-status stream))
       (format t "~&Total messages received: ~A~%" message-count)
-      (and (eql (ag-grpc:stream-status stream) ag-grpc:+grpc-status-ok+)
+      (and (ag-grpc:stream-status-ok-p stream)
            (= message-count 3)))))
 
 ;; Test client streaming RPC
@@ -70,14 +71,14 @@
   (format t "~&Opening client stream...~%")
   (let ((stream (ag-grpc:call-client-streaming channel
                                                 "/hello.Greeter/CollectHellos"
-                                                :response-type 'hellosummary)))
+                                                :response-type 'hello-summary)))
     ;; Send several messages
     (format t "~&Sending 3 HelloRequest messages...~%")
-    (ag-grpc:stream-send stream (make-instance 'hellorequest :name "Alice"))
+    (ag-grpc:stream-send stream (make-instance 'hello-request :name "Alice"))
     (format t "~&  Sent: name='Alice'~%")
-    (ag-grpc:stream-send stream (make-instance 'hellorequest :name "Bob"))
+    (ag-grpc:stream-send stream (make-instance 'hello-request :name "Bob"))
     (format t "~&  Sent: name='Bob'~%")
-    (ag-grpc:stream-send stream (make-instance 'hellorequest :name "Charlie"))
+    (ag-grpc:stream-send stream (make-instance 'hello-request :name "Charlie"))
     (format t "~&  Sent: name='Charlie'~%")
     ;; Close and get response
     (format t "~&Closing stream and receiving response...~%")
@@ -97,12 +98,12 @@
   (format t "~&Opening bidirectional stream...~%")
   (let ((stream (ag-grpc:call-bidirectional-streaming channel
                                                        "/hello.Greeter/Chat"
-                                                       :response-type 'helloreply))
+                                                       :response-type 'hello-reply))
         (received-count 0))
     ;; Send and receive interleaved
     (format t "~&Sending and receiving messages...~%")
     ;; Send first message
-    (ag-grpc:stream-send stream (make-instance 'hellorequest :name "Alice"))
+    (ag-grpc:stream-send stream (make-instance 'hello-request :name "Alice"))
     (format t "~&  Sent: name='Alice'~%")
     ;; Read response
     (let ((reply (ag-grpc:stream-read-message stream)))
@@ -110,7 +111,7 @@
         (incf received-count)
         (format t "~&  Received: [~A] ~A~%" (index reply) (message reply))))
     ;; Send second message
-    (ag-grpc:stream-send stream (make-instance 'hellorequest :name "Bob"))
+    (ag-grpc:stream-send stream (make-instance 'hello-request :name "Bob"))
     (format t "~&  Sent: name='Bob'~%")
     ;; Read response
     (let ((reply (ag-grpc:stream-read-message stream)))
@@ -118,7 +119,7 @@
         (incf received-count)
         (format t "~&  Received: [~A] ~A~%" (index reply) (message reply))))
     ;; Send third message
-    (ag-grpc:stream-send stream (make-instance 'hellorequest :name "Charlie"))
+    (ag-grpc:stream-send stream (make-instance 'hello-request :name "Charlie"))
     (format t "~&  Sent: name='Charlie'~%")
     ;; Read response
     (let ((reply (ag-grpc:stream-read-message stream)))
