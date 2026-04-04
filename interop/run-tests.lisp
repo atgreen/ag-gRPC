@@ -146,8 +146,9 @@
                               sizes))))
       (let ((stream (test-service-streaming-output-call stub request)))
         (let ((received-sizes nil))
-          (ag-grpc:do-stream-messages (response stream)
-            (push (length (body (payload response))) received-sizes))
+          (loop for response = (ag-grpc:stream-receive-message stream)
+                while response
+                do (push (length (body (payload response))) received-sizes))
           (assert-equal (reverse sizes) received-sizes
                         "Response sizes should match"))))))
 
@@ -190,8 +191,9 @@
       (let* ((request (make-instance 'streamingoutputcallrequest))
              (stream (test-service-streaming-output-call stub request))
              (count 0))
-        (ag-grpc:do-stream-messages (response stream)
-          (incf count))
+        (loop for response = (ag-grpc:stream-receive-message stream)
+              while response
+              do (incf count))
         (assert-equal 0 count "Should receive no messages"))
       ;; Empty client streaming
       (let ((stream (test-service-streaming-input-call stub)))
