@@ -1624,7 +1624,7 @@ Returns a grpc-server-stream. Use stream-read-message or do-stream-messages to c
          (AG-PROTO::CALL-FN
           (AND AG-PROTO::GRPC-PKG
                (SYMBOL-FUNCTION
-                (FIND-SYMBOL "CALL-SERVER-STREAMING" AG-PROTO::GRPC-PKG)))))
+                (FIND-SYMBOL "CALL-SERVER-STREAM" AG-PROTO::GRPC-PKG)))))
     (UNLESS AG-PROTO::CALL-FN
       (ERROR
        "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))

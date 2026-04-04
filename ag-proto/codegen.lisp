@@ -822,7 +822,7 @@ then stream-close-and-recv to get the response." service-name method-name)
           ,(format nil "Call ~A.~A server streaming RPC.
 Returns a grpc-server-stream. Use stream-read-message or do-stream-messages to consume." service-name method-name)
           (let* ((grpc-pkg (find-package :ag-grpc))
-                 (call-fn (and grpc-pkg (symbol-function (find-symbol "CALL-SERVER-STREAMING" grpc-pkg)))))
+                 (call-fn (and grpc-pkg (symbol-function (find-symbol "CALL-SERVER-STREAM" grpc-pkg)))))
             (unless call-fn
               (cl:error "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
             (funcall call-fn
