@@ -32,7 +32,7 @@
 (defvar *max-message-size* (* 64 1024 1024)
   "Maximum allowed size in bytes for a single length-delimited field
 (string, bytes, or embedded message).  Set to NIL to disable the check.
-Default: 64 MB.  CL-SEC-2026-0004.")
+Default: 64 MB.  CL-SEC-2026-0197.")
 
 ;;;; ========================================================================
 ;;;; Varint Encoding/Decoding (LEB128)

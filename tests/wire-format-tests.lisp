@@ -231,7 +231,7 @@
           (is (= wire-type decoded-wire)))))))
 
 ;;;; ========================================================================
-;;;; Security Limit Tests (CL-SEC-2026-0004)
+;;;; Security Limit Tests (CL-SEC-2026-0197)
 ;;;; ========================================================================
 
 (test max-message-size-rejects-oversized-length-delimited

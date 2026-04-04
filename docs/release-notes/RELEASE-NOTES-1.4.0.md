@@ -4,7 +4,7 @@
 
 ## Security Fixes
 
-### CL-SEC-2026-0004 — Unbounded allocation from crafted length-delimited fields (HIGH)
+### CL-SEC-2026-0197 — Unbounded allocation from crafted length-delimited fields (HIGH)
 
 The protobuf wire format decoder allocated byte vectors based on a
 varint-decoded length read from the input stream.  A malicious message
