@@ -12,7 +12,7 @@ clean:
 	rm -rf *~ ag-protoc
 
 lint:
-	ocicl lint ag-proto.asd ag-http2.asd ag-grpc.asd ag-grpc-all.asd ag-proto-cli/ag-proto-cli.asd
+	ocicl lint *.asd
 
 test check:
 	sbcl --non-interactive \

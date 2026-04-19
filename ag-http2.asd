@@ -1,12 +1,12 @@
 ;;;; ag-http2.asd - HTTP/2 implementation for Common Lisp
 
-(asdf:defsystem #:ag-http2
+(asdf:defsystem "ag-http2"
   :description "Pure Common Lisp HTTP/2 implementation (RFC 7540)"
   :author "Anthony Green <green@moxielogic.com>"
   :license "MIT"
-  :version "1.2.0"
+  :version "1.4.0"
   :serial t
-  :depends-on (#:usocket #:trivial-utf-8 #:bordeaux-threads)
+  :depends-on ("usocket" "trivial-utf-8" "bordeaux-threads")
   :pathname "ag-http2"
   :components ((:file "package")
                (:file "constants")

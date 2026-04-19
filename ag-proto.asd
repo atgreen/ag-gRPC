@@ -1,12 +1,12 @@
 ;;;; ag-proto.asd - Protocol Buffers (Proto3) implementation for Common Lisp
 
-(asdf:defsystem #:ag-proto
+(asdf:defsystem "ag-proto"
   :description "Pure Common Lisp Protocol Buffers (Proto3) implementation"
   :author "Anthony Green <green@moxielogic.com>"
   :license "MIT"
-  :version "1.2.0"
+  :version "1.4.0"
   :serial t
-  :depends-on (#:iparse #:trivial-utf-8 #:ieee-floats #:trivial-gray-streams)
+  :depends-on ("iparse" "trivial-utf-8" "ieee-floats" "trivial-gray-streams")
   :pathname "ag-proto"
   :components ((:file "package")
                (:file "wire-format")

@@ -1,13 +1,13 @@
 ;;;; ag-grpc.asd - gRPC implementation for Common Lisp
 
-(asdf:defsystem #:ag-grpc
+(asdf:defsystem "ag-grpc"
   :description "Pure Common Lisp gRPC implementation"
   :author "Anthony Green <green@moxielogic.com>"
   :license "MIT"
   :version "1.4.0"
   :serial t
-  :depends-on (#:ag-proto #:ag-http2 #:version-string #:bordeaux-threads
-               #:chipz #:salza2 #:cl-cancel)
+  :depends-on ("ag-proto" "ag-http2" "version-string" "bordeaux-threads"
+               "chipz" "salza2" "cl-cancel")
   :pathname "ag-grpc"
   :components ((:file "package")
                (:file "constants")
