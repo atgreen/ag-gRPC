@@ -1,4 +1,4 @@
-name: Release
+name: Build and Release
 
 on:
   push:
@@ -6,24 +6,209 @@ on:
       - 'v*'
 
 jobs:
-  release:
-    permissions:
-      contents: write
+  # ========================================
+  # Extract version from tag
+  # ========================================
+  extract-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+  # ========================================
+  # Fetch dependencies using ocicl
+  # ========================================
+  fetch-deps:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Extract version number
-        id: get_version
+      - name: Install ocicl (Linux)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          sudo apt-get update
+          sudo apt-get install -y sbcl
+          gh release download v2.16.12 --repo ocicl/ocicl --pattern '*_amd64.deb' --dir /tmp
+          sudo dpkg -i /tmp/ocicl_*_amd64.deb
+          ocicl setup > ~/.sbclrc
+
+      - name: Fetch Lisp dependencies
+        run: ocicl install
+
+      - name: Upload ocicl directory
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ocicl-deps
+          path: ocicl
+          retention-days: 1
+
+  # ========================================
+  # Build, test, and generate SBOM
+  # ========================================
+  build-and-test:
+    needs: [fetch-deps, extract-version]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.extract-version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download ocicl dependencies
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ocicl-deps
+          path: ocicl
+
+      - name: Install build dependencies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl
+          gh release download v2.16.12 --repo ocicl/ocicl --pattern '*_amd64.deb' --dir /tmp
+          sudo dpkg -i /tmp/ocicl_*_amd64.deb
+          ocicl setup > ~/.sbclrc
+
+      - name: Build ag-protoc CLI
+        run: make clean && make
+
+      - name: Run tests
+        run: make test
+
+      - name: Generate SBOM
+        run: ocicl create-sbom cyclonedx ag-grpc-sbom.json
+
+      - name: Package ag-protoc binary
+        run: |
+          mkdir -p dist
+          cp ag-protoc dist/
+          cp README.md LICENSE dist/ 2>/dev/null || true
+          cd dist && tar czf ../ag-protoc-${VERSION}-linux-amd64.tar.gz *
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-package
+          path: |
+            ag-protoc-${{ env.VERSION }}-linux-amd64.tar.gz
+            ag-grpc-sbom.json
+
+  # ========================================
+  # Sign artifacts with Cosign
+  # ========================================
+  sign-artifacts:
+    needs: [build-and-test, extract-version]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    env:
+      VERSION: ${{ needs.extract-version.outputs.version }}
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-package
+          path: ./artifacts
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Sign binary tarball with Cosign
+        run: |
+          cd artifacts
+          cosign sign-blob --yes \
+            --bundle ag-protoc-${VERSION}-linux-amd64.tar.gz.bundle \
+            ag-protoc-${VERSION}-linux-amd64.tar.gz
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-package
+          path: |
+            artifacts/ag-protoc-${{ env.VERSION }}-linux-amd64.tar.gz
+            artifacts/ag-protoc-${{ env.VERSION }}-linux-amd64.tar.gz.bundle
+            artifacts/ag-grpc-sbom.json
+
+  # ========================================
+  # Generate SLSA Level 3 provenance
+  # ========================================
+  generate-provenance-subjects:
+    needs: [sign-artifacts, extract-version]
+    runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    env:
+      VERSION: ${{ needs.extract-version.outputs.version }}
+    steps:
+      - name: Download signed artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-package
+          path: ./artifacts
+
+      - name: Generate hashes for SLSA provenance
+        id: hash
+        run: |
+          cd artifacts
+          sha256sum ag-protoc-${VERSION}-linux-amd64.tar.gz > checksums.txt
+          cat checksums.txt
+          echo "hashes=$(cat checksums.txt | base64 -w0)" >> "$GITHUB_OUTPUT"
+
+  slsa-provenance:
+    needs: [generate-provenance-subjects]
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    # NOTE: SLSA generator requires a tag ref, not a commit SHA — it validates
+    # the builder binary against the release tag. Pinning to SHA breaks it.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: "${{ needs.generate-provenance-subjects.outputs.hashes }}"
+      upload-assets: true
+      provenance-name: provenance.intoto.jsonl
+
+  # ========================================
+  # Create GitHub Release
+  # ========================================
+  release:
+    needs: [build-and-test, sign-artifacts, slsa-provenance, extract-version]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.extract-version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download signed artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-package
+          path: ./artifacts
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum ag-protoc-${VERSION}-linux-amd64.tar.gz ag-grpc-sbom.json ag-protoc-${VERSION}-linux-amd64.tar.gz.bundle > checksums.sha256
+          cat checksums.sha256
 
       - name: Create GitHub release
-        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag: ${{ github.ref_name }}
           name: ag-gRPC ${{ github.ref_name }}
-          bodyFile: docs/release-notes/RELEASE-NOTES-${{ steps.get_version.outputs.version }}.md
-          allowUpdates: true
+          body_path: docs/release-notes/RELEASE-NOTES-${{ env.VERSION }}.md
+          files: |
+            artifacts/ag-protoc-${{ env.VERSION }}-linux-amd64.tar.gz
+            artifacts/ag-protoc-${{ env.VERSION }}-linux-amd64.tar.gz.bundle
+            artifacts/ag-grpc-sbom.json
+            artifacts/checksums.sha256
