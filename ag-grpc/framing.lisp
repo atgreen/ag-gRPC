@@ -177,7 +177,7 @@ Checks decompressed size during decompression to defend against gzip bombs."
                                 (length result) *max-decompressed-size*)))
       (if (typep result '(simple-array (unsigned-byte 8) (*)))
           result
-          (coerce result '(simple-array (unsigned-byte 8) (*))))))))
+          (coerce result '(simple-array (unsigned-byte 8) (*)))))))
 
 (defun decompress-grpc-message (data encoding)
   "Decompress a gRPC message body.
