@@ -34,6 +34,14 @@
 (string, bytes, or embedded message).  Set to NIL to disable the check.
 Default: 64 MB.  CL-SEC-2026-0197.")
 
+(defvar *max-recursion-depth* 100
+  "Maximum allowed nesting depth when deserializing embedded messages.
+Set to NIL to disable the check.  Default: 100 (matches protobuf spec).
+Prevents stack overflow from deeply nested malicious payloads.")
+
+(defvar *current-recursion-depth* 0
+  "Current recursion depth during deserialization. Bound dynamically.")
+
 ;;;; ========================================================================
 ;;;; Varint Encoding/Decoding (LEB128)
 ;;;; ========================================================================
@@ -137,7 +145,7 @@ Returns a list of 4 bytes."
   "Decode a 32-bit little-endian value from bytes.
 Returns (values decoded-value 4)."
   (values (logior (elt bytes start)
-                  (ash (elt bytes (+ start 1)) 8)
+                  (ash (elt bytes (1+ start)) 8)
                   (ash (elt bytes (+ start 2)) 16)
                   (ash (elt bytes (+ start 3)) 24))
           4))
@@ -178,7 +186,7 @@ Returns a list of 8 bytes."
   "Decode a 64-bit little-endian value from bytes.
 Returns (values decoded-value 8)."
   (values (logior (elt bytes start)
-                  (ash (elt bytes (+ start 1)) 8)
+                  (ash (elt bytes (1+ start)) 8)
                   (ash (elt bytes (+ start 2)) 16)
                   (ash (elt bytes (+ start 3)) 24)
                   (ash (elt bytes (+ start 4)) 32)
@@ -339,9 +347,79 @@ Returns (values string bytes-consumed)."
   "Convert a string to a vector of UTF-8 bytes."
   (trivial-utf-8:string-to-utf-8-bytes string))
 
+(defvar *validate-utf8* nil
+  "When true, validate that string fields contain valid UTF-8 during
+deserialization and signal wire-format-error on invalid sequences.
+When NIL, defer to trivial-utf-8's default behavior (no strict check).
+Default: NIL (backwards-compatible).  Set to T for spec-compliant
+strictness.  Note: enabling this is a behavior change — previously
+accepted payloads with invalid UTF-8 in string fields will now error.")
+
 (defun utf8-to-string (bytes)
-  "Convert a vector of UTF-8 bytes to a string."
+  "Convert a vector of UTF-8 bytes to a string.
+Signals wire-format-error on invalid UTF-8 when *validate-utf8* is true."
+  (when *validate-utf8*
+    (validate-utf8-bytes bytes))
   (trivial-utf-8:utf-8-bytes-to-string bytes))
+
+(defun validate-utf8-bytes (bytes)
+  "Validate that BYTES is well-formed UTF-8. Signals wire-format-error if not."
+  (let ((len (length bytes))
+        (i 0))
+    (loop while (< i len)
+          do (let ((b (aref bytes i)))
+               (cond
+                 ;; ASCII (0xxxxxxx)
+                 ((< b #x80) (incf i))
+                 ;; 2-byte (110xxxxx 10xxxxxx)
+                 ((< b #xC0)
+                  (error 'wire-format-error
+                         :message (format nil "Invalid UTF-8: unexpected continuation byte at position ~D" i)))
+                 ((< b #xE0)
+                  (when (or (>= (+ i 1) len)
+                            (/= (logand (aref bytes (+ i 1)) #xC0) #x80))
+                    (error 'wire-format-error
+                           :message (format nil "Invalid UTF-8: bad 2-byte sequence at position ~D" i)))
+                  ;; Check overlong
+                  (when (< b #xC2)
+                    (error 'wire-format-error
+                           :message (format nil "Invalid UTF-8: overlong 2-byte sequence at position ~D" i)))
+                  (incf i 2))
+                 ;; 3-byte (1110xxxx 10xxxxxx 10xxxxxx)
+                 ((< b #xF0)
+                  (when (or (>= (+ i 2) len)
+                            (/= (logand (aref bytes (+ i 1)) #xC0) #x80)
+                            (/= (logand (aref bytes (+ i 2)) #xC0) #x80))
+                    (error 'wire-format-error
+                           :message (format nil "Invalid UTF-8: bad 3-byte sequence at position ~D" i)))
+                  ;; Check overlong and surrogates
+                  (let ((cp (logior (ash (logand b #x0F) 12)
+                                    (ash (logand (aref bytes (+ i 1)) #x3F) 6)
+                                    (logand (aref bytes (+ i 2)) #x3F))))
+                    (when (or (< cp #x800) (<= #xD800 cp #xDFFF))
+                      (error 'wire-format-error
+                             :message (format nil "Invalid UTF-8: overlong or surrogate at position ~D" i))))
+                  (incf i 3))
+                 ;; 4-byte (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx)
+                 ((< b #xF8)
+                  (when (or (>= (+ i 3) len)
+                            (/= (logand (aref bytes (+ i 1)) #xC0) #x80)
+                            (/= (logand (aref bytes (+ i 2)) #xC0) #x80)
+                            (/= (logand (aref bytes (+ i 3)) #xC0) #x80))
+                    (error 'wire-format-error
+                           :message (format nil "Invalid UTF-8: bad 4-byte sequence at position ~D" i)))
+                  ;; Check overlong and max codepoint
+                  (let ((cp (logior (ash (logand b #x07) 18)
+                                    (ash (logand (aref bytes (+ i 1)) #x3F) 12)
+                                    (ash (logand (aref bytes (+ i 2)) #x3F) 6)
+                                    (logand (aref bytes (+ i 3)) #x3F))))
+                    (when (or (< cp #x10000) (> cp #x10FFFF))
+                      (error 'wire-format-error
+                             :message (format nil "Invalid UTF-8: overlong or out of range at position ~D" i))))
+                  (incf i 4))
+                 (t
+                  (error 'wire-format-error
+                         :message (format nil "Invalid UTF-8: byte ~2,'0X at position ~D" b i))))))))
 
 ;;;; ========================================================================
 ;;;; Field Tag Encoding

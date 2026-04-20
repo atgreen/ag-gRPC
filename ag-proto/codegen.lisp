@@ -82,7 +82,7 @@ For example, setting this to \"PROTO-\" will generate class names like PROTO-FOO
     (:bool 'boolean)
     (:string 'string)
     (:bytes '(vector (unsigned-byte 8)))
-    (t t)))  ; Message types become t
+    (otherwise t)))  ; Message types become t
 
 (defun proto3-default-value (type)
   "Return the Proto3 default value for a type"
@@ -94,7 +94,7 @@ For example, setting this to \"PROTO-\" will generate class names like PROTO-FOO
     (:bool nil)
     (:string "")
     (:bytes '(make-array 0 :element-type '(unsigned-byte 8)))
-    (t nil)))  ; Message types default to nil
+    (otherwise nil)))  ; Message types default to nil
 
 (defparameter *cl-reserved-names*
   '(;; Types and special values
@@ -170,7 +170,7 @@ MESSAGE-NAME is the proto message name, used to create message-specific accessor
          (type (proto-field-type field))
          (lisp-type (proto-type-to-lisp-type type))
          (default (proto3-default-value type))
-         (repeated-p (eq (proto-field-label field) :repeated))
+         (repeated-p (eql (proto-field-label field) :repeated))
          (map-p (map-field-p field)))
     `(,slot-name
       :initarg ,(field-name-to-keyword name)
@@ -211,7 +211,7 @@ ONEOFS is the list of oneof descriptors for the message."
          (wire-type (if is-enum +wire-type-varint+ (proto-type-wire-type type)))
          ;; Use :enum for serialization if this is an enum type
          (serialize-type (if is-enum :enum type))
-         (repeated-p (eq (proto-field-label field) :repeated))
+         (repeated-p (eql (proto-field-label field) :repeated))
          (map-p (map-field-p field))
          (oneof-index (proto-field-oneof-index field)))
     (cond
@@ -257,7 +257,7 @@ ONEOFS is the list of oneof descriptors for the message."
     (:bytes `(and ,var (plusp (length ,var))))
     (:bool var)  ; nil is default, so just check truthiness
     ((:double :float) `(and ,var (not (zerop ,var))))
-    (t (if (null default)
+    (otherwise (if (null default)
            var  ; message types - check for non-nil
            `(and ,var (not (eql ,var ,default)))))))
 
@@ -294,7 +294,7 @@ ONEOFS is the list of oneof descriptors for the message."
      `(write-length-delimited (string-to-utf8 ,value-var) ,buffer-var))
     (:bytes
      `(write-length-delimited ,value-var ,buffer-var))
-    (t
+    (otherwise
      ;; Message type - serialize recursively
      `(write-length-delimited (serialize-to-bytes ,value-var) ,buffer-var))))
 
@@ -309,7 +309,7 @@ Returns an expression that evaluates to (key . value)."
             (entry-buf (cons entry-data 0))
             (key ,(proto3-default-value key-type))
             (value ,(proto3-default-value value-deserialize-type)))
-       (loop while (< (cdr entry-buf) (length entry-data))
+       (loop while (< (rest entry-buf) (length entry-data))
              do (let* ((entry-tag (read-varint entry-buf))
                        (entry-field-number (ash entry-tag -3))
                        (entry-wire-type (logand entry-tag #x7)))
@@ -325,6 +325,7 @@ Returns an expression that evaluates to (key . value)."
 (defun generate-field-deserializer-case (field class-name &optional oneofs)
   "Generate a case clause for deserializing a field.
 ONEOFS is the list of oneof descriptors for the message."
+  (declare (ignorable class-name))
   (let* ((name (proto-field-name field))
          (slot-name (field-name-to-slot-name name))
          (field-num (proto-field-number field))
@@ -333,7 +334,7 @@ ONEOFS is the list of oneof descriptors for the message."
          (is-enum (enum-type-p type))
          ;; Use :enum for deserialization if this is an enum type
          (deserialize-type (if is-enum :enum type))
-         (repeated-p (eq (proto-field-label field) :repeated))
+         (repeated-p (eql (proto-field-label field) :repeated))
          (map-p (map-field-p field))
          (oneof-index (proto-field-oneof-index field)))
     `(,field-num
@@ -376,6 +377,7 @@ ONEOFS is the list of oneof descriptors for the message."
                  ,(generate-value-deserializer deserialize-type 'buffer 'wire-type)))))))
 (defun generate-value-deserializer (type buffer-var wire-type-var)
   "Generate code to deserialize a value of the given type"
+  (declare (ignorable wire-type-var))
   (case type
     (:int32
      `(let ((n (logand (read-varint ,buffer-var) #xFFFFFFFF)))  ; mask to 32 bits
@@ -417,8 +419,8 @@ ONEOFS is the list of oneof descriptors for the message."
     (:string
      `(utf8-to-string (read-length-delimited ,buffer-var)))
     (:bytes
-     `(read-length-delimited ,buffer-var))
-    (t
+     `(read-length-delimited-view ,buffer-var))
+    (otherwise
      ;; Message type - deserialize recursively
      ;; Strip package prefix (e.g., "google.protobuf.Any" -> "Any")
      ;; and convert to kebab-case (e.g., "UnaryRequest" -> "UNARY-REQUEST")
@@ -432,7 +434,13 @@ ONEOFS is the list of oneof descriptors for the message."
             (lisp-name-str (lisp-name simple-name))
             (type-class (safe-class-name lisp-name-str nil)))
        `(let ((data (read-length-delimited ,buffer-var)))
-          (deserialize-from-bytes ',type-class data))))))
+          (when (and *max-recursion-depth*
+                     (>= *current-recursion-depth* *max-recursion-depth*))
+            (error 'wire-format-error
+                   :message (format nil "Maximum recursion depth ~D exceeded"
+                                    *max-recursion-depth*)))
+          (let ((*current-recursion-depth* (1+ *current-recursion-depth*)))
+            (deserialize-from-bytes ',type-class data)))))))
 
 ;;; Buffer-based serialization primitives
 
@@ -441,15 +449,11 @@ ONEOFS is the list of oneof descriptors for the message."
    Negative numbers are treated as 64-bit unsigned (10 bytes max)."
   ;; Convert negative numbers to their 64-bit unsigned representation
   (when (minusp n)
-    (setf n (+ n #x10000000000000000)))
+    (incf n 18446744073709551616))
   (loop
     (let ((byte (logand n #x7f)))
       (setf n (ash n -7))
-      (if (zerop n)
-          (progn
-            (vector-push-extend byte buffer)
-            (return))
-          (vector-push-extend (logior byte #x80) buffer)))))
+      (cond ((zerop n) (vector-push-extend byte buffer) (return)) (t (vector-push-extend (logior byte 128) buffer))))))
 
 (defun write-fixed32 (n buffer)
   "Write a fixed32 (little-endian) to a buffer"
@@ -480,15 +484,15 @@ ONEOFS is the list of oneof descriptors for the message."
    Buffer should be a cons of (vector . position)."
   (let* ((result 0)
          (shift 0)
-         (raw-data (car buffer))
+         (raw-data (first buffer))
          ;; Ensure data is a simple array for SBCL optimization
          (data (if (typep raw-data '(simple-array (unsigned-byte 8) (*)))
                    raw-data
                    (let ((simple (make-array (length raw-data) :element-type '(unsigned-byte 8))))
                      (replace simple raw-data)
-                     (setf (car buffer) simple)
+                     (setf (first buffer) simple)
                      simple)))
-         (pos (cdr buffer)))
+         (pos (rest buffer)))
     (loop
       (when (>= pos (length data))
         (error "Unexpected end of buffer reading varint"))
@@ -496,47 +500,76 @@ ONEOFS is the list of oneof descriptors for the message."
         (incf pos)
         (setf result (logior result (ash (logand byte #x7f) shift)))
         (when (zerop (logand byte #x80))
-          (setf (cdr buffer) pos)
+          (setf (rest buffer) pos)
           (return result))
         (incf shift 7)))))
 
 (defun read-fixed32 (buffer)
   "Read a fixed32 from a buffer"
-  (let ((data (car buffer))
-        (pos (cdr buffer)))
+  (let ((data (first buffer))
+        (pos (rest buffer)))
     (when (> (+ pos 4) (length data))
       (error "Unexpected end of buffer reading fixed32"))
     (let ((result (logior (aref data pos)
-                          (ash (aref data (+ pos 1)) 8)
+                          (ash (aref data (1+ pos)) 8)
                           (ash (aref data (+ pos 2)) 16)
                           (ash (aref data (+ pos 3)) 24))))
-      (setf (cdr buffer) (+ pos 4))
+      (setf (rest buffer) (+ pos 4))
       result)))
 
 (defun read-fixed64 (buffer)
   "Read a fixed64 from a buffer"
-  (let ((data (car buffer))
-        (pos (cdr buffer)))
+  (let ((data (first buffer))
+        (pos (rest buffer)))
     (when (> (+ pos 8) (length data))
       (error "Unexpected end of buffer reading fixed64"))
     (let ((result 0))
       (loop for i from 0 below 8
             do (setf result (logior result (ash (aref data (+ pos i)) (* i 8)))))
-      (setf (cdr buffer) (+ pos 8))
+      (setf (rest buffer) (+ pos 8))
       result)))
+
+(defvar *zero-copy-bytes* nil
+  "When true, read-length-delimited-view returns displaced arrays that share
+storage with the receive buffer instead of copying.  This reduces allocation
+on the decode path but changes the representation: displaced arrays are not
+simple-arrays, and they share ownership with the backing buffer.
+Set to NIL to always copy (safe default for backwards compatibility).
+Default: NIL.")
 
 (defun read-length-delimited (buffer)
   "Read length-delimited data from a buffer, returns a fresh vector"
   (let* ((len (read-varint buffer))
-         (data (car buffer))
-         (pos (cdr buffer)))
+         (data (first buffer))
+         (pos (rest buffer)))
     (when (> (+ pos len) (length data))
       (error "Unexpected end of buffer reading length-delimited data"))
     (let ((result (make-array len :element-type '(unsigned-byte 8))))
       (loop for i from 0 below len
             do (setf (aref result i) (aref data (+ pos i))))
-      (setf (cdr buffer) (+ pos len))
+      (setf (rest buffer) (+ pos len))
       result)))
+
+(defun read-length-delimited-view (buffer)
+  "Read length-delimited data from a buffer.  When *zero-copy-bytes* is true
+and the backing data is a simple-array, returns a displaced array sharing
+storage with the buffer (zero-copy).  Otherwise falls back to copying."
+  (let* ((len (read-varint buffer))
+         (data (first buffer))
+         (pos (rest buffer)))
+    (when (> (+ pos len) (length data))
+      (error "Unexpected end of buffer reading length-delimited data"))
+    (setf (rest buffer) (+ pos len))
+    (if (and *zero-copy-bytes*
+             (typep data '(simple-array (unsigned-byte 8) (*))))
+        ;; Zero-copy: displaced array into the receive buffer
+        (make-array len :element-type '(unsigned-byte 8)
+                        :displaced-to data
+                        :displaced-index-offset pos)
+        ;; Fallback: copy
+        (let ((result (make-array len :element-type '(unsigned-byte 8))))
+          (replace result data :start2 pos :end2 (+ pos len))
+          result))))
 
 (defun skip-field (buffer wire-type)
   "Skip a field in the buffer based on wire type"
@@ -544,13 +577,13 @@ ONEOFS is the list of oneof descriptors for the message."
     (#.+wire-type-varint+
      (read-varint buffer))
     (#.+wire-type-fixed64+
-     (incf (cdr buffer) 8))
+     (incf (rest buffer) 8))
     (#.+wire-type-length-delimited+
      (let ((len (read-varint buffer)))
-       (incf (cdr buffer) len)))
+       (incf (rest buffer) len)))
     (#.+wire-type-fixed32+
-     (incf (cdr buffer) 4))
-    (t
+     (incf (rest buffer) 4))
+    (otherwise
      (error "Unknown wire type: ~A" wire-type))))
 
 ;;; Class and method generation
@@ -608,7 +641,7 @@ ONEOFS is the list of oneof descriptors for the message."
                               fields))
          ;; Reverse repeated and map fields at the end (accumulated with push)
          (list-fields (remove-if-not (lambda (f)
-                                       (or (eq (proto-field-label f) :repeated)
+                                       (or (eql (proto-field-label f) :repeated)
                                            (map-field-p f)))
                                      fields))
          (reverse-stmts (mapcar (lambda (f)
@@ -619,7 +652,7 @@ ONEOFS is the list of oneof descriptors for the message."
     `(defmethod deserialize-from-bytes ((type (eql ',class-name)) data)
        (let ((obj (make-instance ',class-name))
              (buffer (cons data 0)))  ; (vector . position)
-         (loop while (< (cdr buffer) (length data))
+         (loop while (< (rest buffer) (length data))
                do (let* ((tag (read-varint buffer))
                          (field-number (ash tag -3))
                          (wire-type (logand tag #x7)))
@@ -678,13 +711,12 @@ ADDITIONAL-ENUM-TYPES is a hash table of extra enum type names to include (from 
 CLASS-PREFIX is an optional string to prefix all generated class and accessor names (e.g., \"PROTO-\")."
   ;; Build enum types table for this file, merging with additional types
   (let* ((local-enums (collect-enum-names file-desc))
-         (*known-enum-types* (if additional-enum-types
-                                 ;; Merge additional enum types into local enums
-                                 (progn
-                                   (maphash (lambda (k v) (setf (gethash k local-enums) v))
-                                            additional-enum-types)
-                                   local-enums)
-                                 local-enums))
+         (*known-enum-types* (cond (additional-enum-types
+                                        (maphash (lambda (k v)
+                                                   (setf (gethash k local-enums) v))
+                                                 additional-enum-types)
+                                        local-enums)
+                                       (t local-enums)))
          (*class-prefix* class-prefix)
          (messages (proto-file-messages file-desc))
          (enums (proto-file-enums file-desc))
@@ -729,8 +761,7 @@ If LOAD is true, also loads the generated code."
           (terpri out)
           (terpri out))))
     (when load
-      (dolist (form forms)
-        (eval form)))
+      (mapc #'eval forms))
     forms))
 
 (defun compile-proto-string (string &key (load t) (package *package*))
@@ -740,8 +771,7 @@ Returns the list of generated forms."
   (let* ((file-desc (parse-proto-string string))
          (forms (generate-lisp-code file-desc :package package)))
     (when load
-      (dolist (form forms)
-        (eval form)))
+      (mapc #'eval forms))
     forms))
 
 ;;;; ========================================================================
@@ -863,4 +893,54 @@ Returns a grpc-server-stream. Use stream-read-message or do-stream-messages to c
     ;; RPC methods
     (dolist (method (proto-service-methods service-desc))
       (push (generate-rpc-method service-desc method proto-package package) forms))
+    ;; Server-side registration helper (monomorphic dispatch)
+    (push (generate-service-registrar service-desc proto-package package) forms)
     (nreverse forms)))
+
+(defun generate-service-registrar (service-desc proto-package package)
+  "Generate a server registration function that uses compile-time dispatch.
+Produces REGISTER-<SERVICE>-SERVICE which registers all handlers and installs
+a cond-based dispatch function, avoiding hash-table lookup on the hot path."
+  (let* ((service-name (proto-service-name service-desc))
+         (register-fn (intern (concatenate 'string "REGISTER-"
+                                           (lisp-name service-name)
+                                           "-SERVICE")
+                              package))
+         (methods (proto-service-methods service-desc))
+         (handler-params (mapcar (lambda (m)
+                                   (intern (lisp-name (format nil "~A-HANDLER"
+                                                              (proto-method-name m)))
+                                           package))
+                                 methods))
+         ;; Build method paths
+         (method-paths (mapcar (lambda (m)
+                                 (if (and proto-package (plusp (length proto-package)))
+                                     (format nil "/~A.~A/~A" proto-package service-name
+                                             (proto-method-name m))
+                                     (format nil "/~A/~A" service-name (proto-method-name m))))
+                               methods)))
+    `(defun ,register-fn (server &key ,@handler-params)
+       ,(format nil "Register all ~A service handlers with SERVER.~%~
+Uses compile-time dispatch on method path (no hash-table lookup per request).~%~
+Each keyword arg is a handler function for the corresponding RPC method."
+                service-name)
+       ;; Register each handler individually (for introspection/reflection)
+       ,@(loop for method in methods
+               for param in handler-params
+               for path in method-paths
+               collect
+               (let* ((input-type (proto-method-input-type method))
+                      (output-type (proto-method-output-type method))
+                      (request-class (safe-class-name (lisp-name input-type) package))
+                      (response-class (safe-class-name (lisp-name output-type) package)))
+                 `(when ,param
+                    (let* ((grpc-pkg (find-package :ag-grpc))
+                           (register-fn (and grpc-pkg (fdefinition
+                                                        (find-symbol "SERVER-REGISTER-HANDLER" grpc-pkg)))))
+                      (when register-fn
+                        (funcall register-fn server ,path ,param
+                                 :request-type ',request-class
+                                 :response-type ',response-class
+                                 :client-streaming ,(proto-method-client-streaming method)
+                                 :server-streaming ,(proto-method-server-streaming method)))))))
+       server)))

@@ -2,6 +2,7 @@
 
 (defpackage #:ag-proto
   (:use #:cl)
+  (:documentation "Protocol Buffers 3 implementation for Common Lisp.")
   (:export
    ;; Wire format encoding/decoding
    #:encode-varint
@@ -166,4 +167,8 @@
    #:proto-parse-error
 
    ;; Security limits
-   #:*max-message-size*))
+   #:*max-message-size*
+   #:*max-recursion-depth*
+   #:*current-recursion-depth*
+   #:*validate-utf8*
+   #:*zero-copy-bytes*))

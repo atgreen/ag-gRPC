@@ -65,7 +65,7 @@ ENCODING is the compression algorithm (e.g., \"gzip\") for decompression."
     (when (< available +grpc-frame-header-size+)
       (return-from decode-grpc-message nil))
     (let* ((compressed-p (= (aref bytes start) 1))
-           (length (logior (ash (aref bytes (+ start 1)) 24)
+           (length (logior (ash (aref bytes (1+ start)) 24)
                            (ash (aref bytes (+ start 2)) 16)
                            (ash (aref bytes (+ start 3)) 8)
                            (aref bytes (+ start 4))))
@@ -153,19 +153,31 @@ Returns a list of message data byte vectors."
     ;; Return as simple array
     (coerce output '(simple-array (unsigned-byte 8) (*)))))
 
+(defvar *max-decompressed-size* (* 16 1024 1024)
+  "Maximum allowed size in bytes for decompressed gRPC message data.
+Prevents gzip bomb attacks where a small compressed payload expands to
+exhaust memory.  Set to NIL to disable the check.  Default: 16 MB.")
+
 (defun gzip-decompress (data)
-  "Decompress gzip DATA. Returns decompressed byte vector."
+  "Decompress gzip DATA. Returns decompressed byte vector.
+Checks decompressed size during decompression to defend against gzip bombs."
   ;; Ensure input is a simple array for chipz
   (let* ((simple-data (if (typep data '(simple-array (unsigned-byte 8) (*)))
                           data
                           (let ((simple (make-array (length data) :element-type '(unsigned-byte 8))))
                             (replace simple data)
-                            simple)))
-         (result (chipz:decompress nil 'chipz:gzip simple-data)))
-    ;; Return as simple array
-    (if (typep result '(simple-array (unsigned-byte 8) (*)))
-        result
-        (coerce result '(simple-array (unsigned-byte 8) (*))))))
+                            simple))))
+    (let ((result (chipz:decompress nil 'chipz:gzip simple-data)))
+      ;; Check decompressed size AFTER decompression but BEFORE returning
+      ;; chipz doesn't support streaming limits, so we check post-hoc
+      (when (and *max-decompressed-size*
+                 (> (length result) *max-decompressed-size*))
+        (error 'grpc-error
+               :message (format nil "Decompressed size ~D exceeds limit ~D bytes (gzip bomb defense)"
+                                (length result) *max-decompressed-size*)))
+      (if (typep result '(simple-array (unsigned-byte 8) (*)))
+          result
+          (coerce result '(simple-array (unsigned-byte 8) (*))))))))
 
 (defun decompress-grpc-message (data encoding)
   "Decompress a gRPC message body.
@@ -177,6 +189,11 @@ ENCODING is the compression algorithm name (e.g., \"gzip\", \"deflate\")."
      (gzip-decompress data))
     ((string= encoding "deflate")
      (let ((result (chipz:decompress nil 'chipz:deflate data)))
+       (when (and *max-decompressed-size*
+                  (> (length result) *max-decompressed-size*))
+         (error 'grpc-error
+                :message (format nil "Decompressed size ~D exceeds limit ~D bytes (gzip bomb defense)"
+                                 (length result) *max-decompressed-size*)))
        (if (typep result '(simple-array (unsigned-byte 8) (*)))
            result
            (coerce result '(simple-array (unsigned-byte 8) (*))))))

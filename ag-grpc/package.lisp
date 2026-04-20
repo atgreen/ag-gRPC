@@ -1,6 +1,7 @@
 ;;;; package.lisp - Package definition for ag-grpc
 
 (defpackage #:ag-grpc
+  (:documentation "gRPC client and server implementation for Common Lisp.")
   (:use #:cl)
   ;; Import cl-cancel symbols for use
   (:import-from #:cl-cancel
@@ -43,6 +44,7 @@
    ;; Framing
    #:encode-grpc-message
    #:decode-grpc-message
+   #:*max-decompressed-size*
 
    ;; Metadata
    #:grpc-metadata
@@ -128,6 +130,7 @@
    #:response-header
    #:response-trailer
    #:response-value
+   #:ensure-response
    #:check-response
 
    ;; Stream iterators

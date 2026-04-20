@@ -91,20 +91,20 @@
                  :stream stream
                  :response-type (typecase stream
                                   (grpc-server-stream (stream-response-type stream))
-                                  (grpc-bidi-stream (bidi-stream-response-type stream)))))
+                                  (grpc-bidi-stream (bidi-stream-response-type stream))
+                                  (otherwise nil))))
 
 (defmethod iterator-next ((iter grpc-stream-iterator))
   "Get the next message, returns (values message present-p)"
   (when (iterator-exhausted-p iter)
     (return-from iterator-next (values nil nil)))
   (let ((msg (stream-read-message (iterator-stream iter))))
-    (if msg
-        (progn
-          (setf (iterator-current iter) msg)
-          (values msg t))
-        (progn
-          (setf (iterator-exhausted-p iter) t)
-          (values nil nil)))))
+    (cond (msg
+           (setf (iterator-current iter) msg)
+           (values msg t))
+          (t
+           (setf (iterator-exhausted-p iter) t)
+           (values nil nil)))))
 
 (defmethod iterator-peek ((iter grpc-stream-iterator))
   "Peek at the current message without advancing"
@@ -170,10 +170,15 @@ Returns (values message found-p) or (values nil nil) if not found."
   "Get the response message, or DEFAULT if nil"
   (or (response-message response) default))
 
-(defun check-response (response)
+(defun ensure-response (response)
   "Signal an error if response is not OK, otherwise return the message"
   (unless (response-ok-p response)
     (error 'grpc-status-error
            :code (response-status response)
            :message (response-status-message response)))
   (response-message response))
+
+(defun check-response (response)
+  "Deprecated: use ENSURE-RESPONSE instead.
+Signal an error if response is not OK, otherwise return the message."
+  (ensure-response response))

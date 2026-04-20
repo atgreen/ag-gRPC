@@ -21,12 +21,12 @@
   "Create a new metadata container with optional initial entries"
   (let ((md (make-instance 'grpc-metadata)))
     (dolist (entry initial-entries)
-      (metadata-add md (car entry) (cdr entry)))
+      (metadata-add md (first entry) (rest entry)))
     md))
 
 (defun metadata-get (metadata key)
   "Get the first value for a key, or NIL if not present"
-  (cdr (assoc (string-downcase key) (metadata-entries metadata)
+  (rest (assoc (string-downcase key) (metadata-entries metadata)
               :test #'string=)))
 
 (defun metadata-get-all (metadata key)
@@ -39,9 +39,9 @@
   "Set a key to a single value, replacing any existing values"
   (let ((normalized-key (string-downcase key)))
     (setf (metadata-entries metadata)
-          (cons (cons normalized-key value)
-                (remove normalized-key (metadata-entries metadata)
-                        :key #'car :test #'string=)))))
+          (acons normalized-key value
+                 (remove normalized-key (metadata-entries metadata)
+                        :key (function car) :test (function string=))))))
 
 (defun metadata-add (metadata key value)
   "Add a value for a key (allows multiple values per key)"
@@ -84,7 +84,7 @@ Returns a new metadata object."
   (let ((result (metadata-copy base)))
     (dolist (other others)
       (dolist (entry (metadata-entries other))
-        (metadata-set result (car entry) (cdr entry))))
+        (metadata-set result (first entry) (rest entry))))
     result))
 
 (defun metadata-to-alist (metadata)
@@ -125,7 +125,7 @@ Skips pseudo-headers and standard gRPC headers."
   (when (and headers (listp headers))
     (loop for entry in headers
           when (and (consp entry)
-                    (let ((key (car entry)))
+                    (let ((key (first entry)))
                       ;; Keep only custom metadata headers
                       (not (or (and (keywordp key)
                                     (member key '(:status :method :scheme :path :authority)))
@@ -134,8 +134,8 @@ Skips pseudo-headers and standard gRPC headers."
                                                   "grpc-accept-encoding" "grpc-timeout" "grpc-status"
                                                   "grpc-message")
                                             :test #'string-equal))))))
-            collect (let ((key (car entry))
-                          (value (cdr entry)))
+            collect (let ((key (first entry))
+                          (value (rest entry)))
                       (if (and (stringp key) (binary-metadata-key-p key))
                           (handler-case
                               (cons key (decode-binary-metadata value))
@@ -183,7 +183,7 @@ Skips pseudo-headers and standard gRPC headers."
                              :fill-pointer 0)))
     (loop for i from 0 below len by 4
           for c0 = (position (char string i) *base64-chars*)
-          for c1 = (position (char string (+ i 1)) *base64-chars*)
+          for c1 = (position (char string (1+ i)) *base64-chars*)
           for c2-char = (char string (+ i 2))
           for c3-char = (char string (+ i 3))
           for c2 = (unless (char= c2-char #\=) (position c2-char *base64-chars*))
@@ -239,8 +239,8 @@ Skips pseudo-headers and standard gRPC headers."
                                 (list (cons "grpc-timeout" formatted-timeout)))))))
     (when metadata
       (dolist (entry (metadata-entries metadata))
-        (let ((key (car entry))
-              (value (cdr entry)))
+        (let ((key (first entry))
+              (value (rest entry)))
           ;; Skip grpc-encoding since we already handled it above
           (unless (string-equal key "grpc-encoding")
             ;; Binary metadata keys (ending in -bin) must be base64 encoded
@@ -258,8 +258,8 @@ Pseudo-headers (:status) come first per RFC 9113."
   (let ((tail nil))
     (when metadata
       (dolist (entry (metadata-entries metadata))
-        (let ((key (car entry))
-              (value (cdr entry)))
+        (let ((key (first entry))
+              (value (rest entry)))
           ;; Binary metadata keys (ending in -bin) must be base64 encoded
           (if (binary-metadata-key-p key)
               (push (cons key (encode-binary-metadata value)) tail)
@@ -277,8 +277,8 @@ Pseudo-headers (:status) come first per RFC 9113."
       (push (cons "grpc-message" (percent-encode message)) trailers))
     (when metadata
       (dolist (entry (metadata-entries metadata))
-        (let ((key (car entry))
-              (value (cdr entry)))
+        (let ((key (first entry))
+              (value (rest entry)))
           ;; Binary metadata keys (ending in -bin) must be base64 encoded
           (if (binary-metadata-key-p key)
               (push (cons key (encode-binary-metadata value)) trailers)
@@ -363,23 +363,40 @@ Pseudo-headers (:status) come first per RFC 9113."
     ((< seconds 60)
      (format nil "~DS" (round seconds)))           ; seconds
     ((< seconds 3600)
-     (format nil "~DM" (round (/ seconds 60))))    ; minutes
+     (format nil "~DM" (round seconds 60)))    ; minutes
     (t
-     (format nil "~DH" (round (/ seconds 3600))))))  ; hours
+     (format nil "~DH" (round seconds 3600)))))  ; hours
+
+(defparameter *max-grpc-timeout-seconds* (* 24 365 3600)
+  "Maximum allowed timeout in seconds (1 year).
+Prevents numeric overflow when adding timeout to current time.")
 
 (defun parse-grpc-timeout (timeout-str)
-  "Parse a grpc-timeout header value. Returns timeout in seconds."
+  "Parse a grpc-timeout header value. Returns timeout in seconds.
+Validates the value is within spec limits (1-8 digits) and caps at
+*max-grpc-timeout-seconds* to prevent overflow when added to current time."
+  (when (or (null timeout-str) (< (length timeout-str) 2))
+    (return-from parse-grpc-timeout 0))
   (let* ((len (length timeout-str))
          (unit (char timeout-str (1- len)))
-         (value (parse-integer (subseq timeout-str 0 (1- len)))))
-    (case unit
-      (#\n (* value 1e-9))   ; nanoseconds
-      (#\u (* value 1e-6))   ; microseconds
-      (#\m (* value 1e-3))   ; milliseconds
-      (#\S value)            ; seconds
-      (#\M (* value 60))     ; minutes
-      (#\H (* value 3600))   ; hours
-      (t value))))
+         (digits (subseq timeout-str 0 (1- len))))
+    ;; Spec: timeout = 1*8DIGIT TimeoutUnit
+    (when (> (length digits) 8)
+      (return-from parse-grpc-timeout *max-grpc-timeout-seconds*))
+    (let* ((value (handler-case (parse-integer digits)
+                    (error () (return-from parse-grpc-timeout 0))))
+           (seconds (case unit
+                      (#\n (* value 1e-9))   ; nanoseconds
+                      (#\u (* value 1e-6))   ; microseconds
+                      (#\m (* value 1e-3))   ; milliseconds
+                      (#\S value)            ; seconds
+                      (#\M (* value 60))     ; minutes
+                      (#\H (* value 3600))   ; hours
+                      (otherwise value))))
+      ;; Cap to prevent overflow when added to Instant/time
+      (if (and *max-grpc-timeout-seconds* (> seconds *max-grpc-timeout-seconds*))
+          *max-grpc-timeout-seconds*
+          seconds))))
 
 ;;;; ========================================================================
 ;;;; Percent Encoding (for grpc-message)
