@@ -40,7 +40,7 @@ jobs:
           ocicl setup > ~/.sbclrc
 
       - name: Fetch Lisp dependencies
-        run: ocicl install
+        run: ocicl install iparse trivial-utf-8 ieee-floats trivial-gray-streams usocket bordeaux-threads version-string chipz salza2 cl-cancel fiveam pure-tls
 
       - name: Upload ocicl directory
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
