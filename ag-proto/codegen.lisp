@@ -920,9 +920,7 @@ a cond-based dispatch function, avoiding hash-table lookup on the hot path."
                                      (format nil "/~A/~A" service-name (proto-method-name m))))
                                methods)))
     `(defun ,register-fn (server &key ,@handler-params)
-       ,(format nil "Register all ~A service handlers with SERVER.~%~
-Uses compile-time dispatch on method path (no hash-table lookup per request).~%~
-Each keyword arg is a handler function for the corresponding RPC method."
+       ,(format nil "Register all ~A service handlers with SERVER.~%Uses compile-time dispatch on method path (no hash-table lookup per request).~%Each keyword arg is a handler function for the corresponding RPC method."
                 service-name)
        ;; Register each handler individually (for introspection/reflection)
        ,@(loop for method in methods
