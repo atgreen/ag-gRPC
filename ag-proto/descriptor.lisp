@@ -179,7 +179,7 @@
      +wire-type-fixed32+)
     ((:string :bytes :message)
      +wire-type-length-delimited+)
-    (t
+    (otherwise
      ;; Default to length-delimited for unknown types (messages)
      +wire-type-length-delimited+)))
 
@@ -197,4 +197,4 @@
     ((:bool) nil)
     ((:string) "")
     ((:bytes) #())
-    (t nil)))  ; Messages default to nil (not present)
+    (otherwise nil)))  ; Messages default to nil (not present)

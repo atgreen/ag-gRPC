@@ -165,4 +165,4 @@ Client streams use odd IDs, server streams use even IDs."
 (defun multiplexer-active-streams (mux)
   "Return count of non-closed streams"
   (loop for stream being the hash-values of (multiplexer-streams mux)
-        count (not (eq (stream-state stream) :closed))))
+        count (not (eql (stream-state stream) :closed))))

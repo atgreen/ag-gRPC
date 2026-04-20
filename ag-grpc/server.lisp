@@ -171,7 +171,8 @@ SERVER-STREAMING - T if server sends multiple messages"
    (request-encoding :initform nil :accessor context-request-encoding
                      :documentation "Compression encoding used by client (from grpc-encoding header)")
    (response-encoding :initform nil :accessor context-response-encoding
-                      :documentation "Compression encoding to use for responses (negotiated from grpc-accept-encoding)"))
+                      :documentation
+                      "Compression encoding to use for responses (negotiated from grpc-accept-encoding)"))
   (:documentation "Context for an RPC call, passed to handlers"))
 
 (defun context-metadata (ctx &optional key)
@@ -302,7 +303,7 @@ SERVER-STREAMING - T if server sends multiple messages"
 (defun server-start (server)
   "Start the gRPC server. This function blocks while handling connections.
 Use server-stop from another thread to shut down."
-  (when (eq (server-state server) :running)
+  (when (eql (server-state server) :running)
     (error "Server is already running"))
   ;; Create listening socket
   (setf (server-socket server)
@@ -342,7 +343,7 @@ If GRACEFUL is true, wait for active connections to finish."
 (defun server-accept-loop (server)
   "Accept and handle incoming connections"
   (let ((sem (server-connection-semaphore server)))
-    (loop while (eq (server-state server) :running)
+    (loop while (eql (server-state server) :running)
           do (handler-case
                  (let ((client-socket (usocket:socket-accept (server-socket server))))
                    (when client-socket
@@ -392,7 +393,7 @@ If GRACEFUL is true, wait for active connections to finish."
 
 (defun server-connection-loop (server conn peer-addr)
   "Process frames for a connection until closed"
-  (loop while (eq (ag-http2:connection-state conn) :open)
+  (loop while (eql (ag-http2:connection-state conn) :open)
         do (handler-case
                (let ((frame (ag-http2:connection-read-frame conn)))
                  (when frame
@@ -418,7 +419,7 @@ If GRACEFUL is true, wait for active connections to finish."
     (ag-http2:data-frame
      (server-handle-data server conn frame))
     ;; Other frame types are handled by connection-read-frame
-    (t nil)))
+    (otherwise nil)))
 
 (defun server-handle-headers (server conn frame peer-addr)
   "Handle incoming HEADERS frame (new RPC request)"
@@ -427,7 +428,7 @@ If GRACEFUL is true, wait for active connections to finish."
                      (ag-http2:connection-multiplexer conn)
                      stream-id))
          (headers (ag-http2:stream-headers h2-stream))
-         (method-path (cdr (assoc :path headers)))
+         (method-path (rest (assoc :path headers)))
          (handler (server-get-handler server method-path)))
     (unless handler
       ;; No handler registered - send UNIMPLEMENTED
@@ -440,7 +441,7 @@ If GRACEFUL is true, wait for active connections to finish."
       (ag-http2:connection-send-rst-stream conn stream-id ag-http2:+error-refused-stream+)
       (return-from server-handle-headers))
     ;; Parse timeout and create cl-cancel context with deadline
-    (let ((timeout-header (cdr (assoc "grpc-timeout" headers :test #'string-equal))))
+    (let ((timeout-header (rest (assoc "grpc-timeout" headers :test #'string-equal))))
       (multiple-value-bind (call-ctx cancel-fn)
           (if timeout-header
               (let* ((timeout-seconds (parse-grpc-timeout timeout-header))
@@ -457,15 +458,14 @@ If GRACEFUL is true, wait for active connections to finish."
                                   :cancel-context call-ctx
                                   :cancel-fn cancel-fn)))
           ;; Extract compression encoding from client request
-      (let ((request-encoding (cdr (assoc "grpc-encoding" headers :test #'string-equal))))
+      (let ((request-encoding (rest (assoc "grpc-encoding" headers :test #'string-equal))))
         (when (and request-encoding (not (string-equal request-encoding "identity")))
           (setf (context-request-encoding ctx) request-encoding)))
       ;; Negotiate response compression based on client's accept-encoding
-      (let ((accept-encoding (cdr (assoc "grpc-accept-encoding" headers :test #'string-equal))))
-        (when accept-encoding
-          ;; Check if client accepts gzip
-          (when (search "gzip" accept-encoding :test #'char-equal)
-            (setf (context-response-encoding ctx) "gzip"))))
+      (let ((accept-encoding (rest (assoc "grpc-accept-encoding" headers :test #'string-equal))))
+        (when (and accept-encoding
+                   (search "gzip" accept-encoding :test #'char-equal))
+          (setf (context-response-encoding ctx) "gzip")))
       ;; Store context for DATA frame handling (connection-local, thread-safe)
       (connection-set-stream-context conn h2-stream ctx)
       (connection-set-stream-handler conn h2-stream handler)
@@ -526,36 +526,29 @@ If GRACEFUL is true, wait for active connections to finish."
     (unless (and ctx handler)
       (return-from server-handle-data))
 
-    (if msg-buffer
-        ;; Streaming RPC: decode messages from stream data buffer.
-        ;; Note: frame data was already appended to the stream's data buffer
-        ;; by process-frame (stream-append-data), so we just decode here.
-        (progn
-          (let ((byte-buffer (ag-http2:stream-data-buffer h2-stream))
-                (request-encoding (context-request-encoding ctx)))
-            ;; Try to decode complete messages from buffer
-            (loop
-              (multiple-value-bind (msg-data compressed consumed)
-                  (decode-grpc-message byte-buffer 0 request-encoding)
-                (declare (ignore compressed))
-                (unless msg-data
-                  (return)) ; No complete message yet
-                ;; Decode protobuf and append to message buffer
-                (let* ((request-type (handler-request-type handler))
-                       (message (ag-proto:deserialize-from-bytes request-type msg-data)))
-                  (buffer-push-message msg-buffer message))
-                ;; Remove consumed bytes
-                (let ((remaining (subseq byte-buffer consumed)))
-                  (setf (fill-pointer byte-buffer) 0)
-                  (loop for byte across remaining
-                        do (vector-push-extend byte byte-buffer))))))
-          ;; If END_STREAM, close the buffer
-          (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
-            (buffer-close msg-buffer)))
-        ;; Unary RPC: data already appended by process-frame, dispatch on END_STREAM
-        (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
-          (let ((buffer (ag-http2:stream-data-buffer h2-stream)))
-            (server-dispatch-handler server conn ctx handler buffer))))))
+    (cond (msg-buffer
+           (let ((byte-buffer (stream-data-buffer h2-stream))
+                 (request-encoding (context-request-encoding ctx)))
+             (loop
+               (multiple-value-bind (msg-data compressed consumed)
+                   (decode-grpc-message byte-buffer 0 request-encoding)
+                 (declare (ignore compressed))
+                 (unless msg-data (return))
+                 (let* ((request-type (handler-request-type handler))
+                        (message (deserialize-from-bytes
+                                  request-type msg-data)))
+                   (buffer-push-message msg-buffer message))
+                 (let ((remaining (subseq byte-buffer consumed)))
+                   (setf (fill-pointer byte-buffer) 0)
+                   (loop for byte across remaining
+                         do (vector-push-extend byte byte-buffer))))))
+           (when (plusp (logand (frame-flags frame) +flag-end-stream+))
+             (buffer-close msg-buffer)))
+          (t
+           (when (plusp (logand (frame-flags frame) +flag-end-stream+))
+             (let ((buffer (stream-data-buffer h2-stream)))
+               (server-dispatch-handler
+                server conn ctx handler buffer)))))))
 
 ;;;; ========================================================================
 ;;;; Handler Dispatch
@@ -593,7 +586,8 @@ If GRACEFUL is true, wait for active connections to finish."
                     (:client-streaming
                      (server-handle-client-streaming conn ctx handler request-data interceptors))
                     (:bidi-streaming
-                     (server-handle-bidi-streaming conn ctx handler request-data interceptors))))
+                     (server-handle-bidi-streaming conn ctx handler request-data interceptors))
+                    (otherwise nil)))
           (error (e)
             (setf error-occurred e)))
         ;; Run post-handler interceptors
@@ -789,12 +783,7 @@ Now reads from message buffer (doesn't block connection thread)."
     ;; Block on buffer until message arrives (or stream closes)
     (multiple-value-bind (message found-p)
         (buffer-pop-message msg-buffer)
-      (if found-p
-          message
-          (progn
-            ;; Buffer closed, no more messages
-            (setf (server-stream-recv-closed-p stream) t)
-            nil)))))
+      (cond (found-p message) (t (setf (server-stream-recv-closed-p stream) t) nil)))))
 
 (defmacro do-stream-recv ((var stream &optional result) &body body)
   "Iterate over received messages from a stream.
@@ -804,7 +793,7 @@ Returns RESULT (default NIL) when no more messages."
     `(let ((,stream-var ,stream))
        (loop for ,var = (stream-recv ,stream-var)
              while ,var
-             do (progn ,@body)
+             do ,@body
              finally (return ,result)))))
 
 ;;;; ========================================================================
@@ -880,7 +869,7 @@ Example:
   `(let ((,var (make-grpc-server ,port ,@options)))
      (unwind-protect
           (progn ,@body)
-       (when (eq (server-state ,var) :running)
+       (when (eql (server-state ,var) :running)
          (server-stop ,var)))))
 
 ;;;; ========================================================================

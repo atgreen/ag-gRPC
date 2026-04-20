@@ -38,7 +38,7 @@
     (#.+error-enhance-your-calm+ "ENHANCE_YOUR_CALM")
     (#.+error-inadequate-security+ "INADEQUATE_SECURITY")
     (#.+error-http-1-1-required+ "HTTP_1_1_REQUIRED")
-    (t (format nil "UNKNOWN_ERROR_~A" code))))
+    (otherwise (format nil "UNKNOWN_ERROR_~A" code))))
 
 ;;;; ========================================================================
 ;;;; Flow Control Constants

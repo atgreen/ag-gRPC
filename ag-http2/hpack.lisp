@@ -345,7 +345,7 @@
 
 (defun build-huffman-decode-tree ()
   "Build a tree structure for Huffman decoding"
-  (let ((tree (cons nil nil)))  ; Root node
+  (let ((tree (list nil)))  ; Root node
     (loop for symbol from 0 to 256
           for entry across *hpack-huffman-codes*
           for code = (first entry)
@@ -354,17 +354,17 @@
                ;; Walk down the tree, creating nodes as needed
                (loop for bit-pos from (1- bits) downto 0
                      for bit = (logand 1 (ash code (- bit-pos)))
-                     do (if (zerop bit)
-                            (progn
-                              (unless (car node)
-                                (setf (car node) (cons nil nil)))
-                              (setf node (car node)))
-                            (progn
-                              (unless (cdr node)
-                                (setf (cdr node) (cons nil nil)))
-                              (setf node (cdr node)))))
+                     do (cond
+                          ((zerop bit)
+                           (unless (first node)
+                             (setf (first node) (list nil)))
+                           (setf node (first node)))
+                          (t
+                           (unless (rest node)
+                             (setf (rest node) (list nil)))
+                           (setf node (rest node)))))
                ;; Store symbol at leaf
-               (setf (car node) symbol)))
+               (setf (first node) symbol)))
     tree))
 
 (defun get-huffman-decode-tree ()
@@ -381,9 +381,9 @@
     (loop for byte across bytes
           do (loop for bit-pos from 7 downto 0
                    for bit = (logand 1 (ash byte (- bit-pos)))
-                   do (setf node (if (zerop bit) (car node) (cdr node)))
-                   when (and node (atom (car node)))
-                   do (let ((symbol (car node)))
+                   do (setf node (if (zerop bit) (first node) (rest node)))
+                   when (and node (atom (first node)))
+                   do (let ((symbol (first node)))
                         (when (< symbol 256)  ; Not EOS
                           (vector-push-extend symbol result))
                         (setf node tree))))
@@ -426,7 +426,7 @@ Handles both string and keyword names."
   "Evict the oldest entry from the dynamic table"
   (let* ((entries (dynamic-table-entries table))
          (entry (aref entries 0))
-         (entry-size (+ 32 (hpack-header-name-length (car entry)) (length (cdr entry)))))
+         (entry-size (+ 32 (hpack-header-name-length (first entry)) (length (rest entry)))))
     (decf (dynamic-table-size table) entry-size)
     ;; Shift entries down
     (loop for i from 0 below (1- (fill-pointer entries))
@@ -448,11 +448,13 @@ Handles both string and keyword names."
 
 (defun make-hpack-encoder (&key (huffman nil) (table-size 4096))
   "Create a new HPACK encoder"
+  (declare (ignore table-size))
   (make-instance 'hpack-encoder
                  :huffman huffman))
 
 (defun make-hpack-decoder (&key (table-size 4096))
   "Create a new HPACK decoder"
+  (declare (ignore table-size))
   (make-instance 'hpack-decoder))
 
 ;;;; ========================================================================
@@ -501,6 +503,7 @@ Handles both string and keyword names."
 
 (defun hpack-encode-string (string output &key huffman)
   "Encode a string (with or without Huffman coding)"
+  (declare (ignore huffman))
   (let* ((bytes (trivial-utf-8:string-to-utf-8-bytes string))
          (len (length bytes)))
     ;; For now, always use literal (no Huffman)
@@ -529,11 +532,12 @@ Handles both string and keyword names."
 
 (defun hpack-encode (encoder headers)
   "Encode a list of headers. Returns a byte vector."
+  (declare (ignore encoder))
   (let ((output (make-array 256 :element-type '(unsigned-byte 8)
                                 :fill-pointer 0 :adjustable t)))
     (dolist (header headers)
-      (let* ((name (car header))
-             (value (cdr header))
+      (let* ((name (first header))
+             (value (rest header))
              (name-string (if (keywordp name)
                               (format nil ":~A" (string-downcase (symbol-name name)))
                               (string-downcase name)))
@@ -628,7 +632,7 @@ DECODER is needed to look up indexed names from the dynamic table."
             ;; But we need to properly decode the index (may have continuation bytes)
             (multiple-value-bind (index idx-new-pos)
                 (hpack-decode-integer prefix-bits bytes pos)
-              (values (car (hpack-get-indexed decoder index)) idx-new-pos)))
+              (values (first (hpack-get-indexed decoder index)) idx-new-pos)))
       (multiple-value-bind (value final-pos)
           (hpack-decode-string bytes new-pos)
         (values name value final-pos)))))

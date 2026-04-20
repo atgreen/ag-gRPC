@@ -25,7 +25,7 @@
 (defmethod ag-proto:deserialize-from-bytes ((type (eql 'health-check-request)) data)
   (let ((obj (make-instance 'health-check-request))
         (buffer (cons data 0)))
-    (loop while (< (cdr buffer) (length data))
+    (loop while (< (rest buffer) (length data))
           do (let* ((tag (ag-proto::read-varint buffer))
                     (field-number (ash tag -3))
                     (wire-type (logand tag 7)))
@@ -56,7 +56,7 @@
 (defmethod ag-proto:deserialize-from-bytes ((type (eql 'health-check-response)) data)
   (let ((obj (make-instance 'health-check-response))
         (buffer (cons data 0)))
-    (loop while (< (cdr buffer) (length data))
+    (loop while (< (rest buffer) (length data))
           do (let* ((tag (ag-proto::read-varint buffer))
                     (field-number (ash tag -3))
                     (wire-type (logand tag 7)))
@@ -94,8 +94,8 @@ STATUS: One of +health-serving+, +health-not-serving+, +health-unknown+"
     (setf (gethash service-name (health-status-map health-service)) status)
     ;; Notify watchers
     (dolist (watcher (health-watchers health-service))
-      (when (equal (car watcher) service-name)
-        (let ((stream (cdr watcher)))
+      (when (equal (first watcher) service-name)
+        (let ((stream (rest watcher)))
           ;; Try to send update, remove watcher if stream is closed
           (handler-case
               (stream-send stream (make-instance 'health-check-response :status status))

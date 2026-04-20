@@ -141,8 +141,7 @@
     (when load
       (when verbose
         (format *error-output* "; Loading generated code~%"))
-      (dolist (form forms)
-        (eval form)))
+      (mapc #'eval forms))
     (when verbose
       (format *error-output* "; Generated ~D forms~%" (length forms)))
     forms))
@@ -163,7 +162,7 @@
       (format *error-output* "Error: No input files specified~%")
       (format *error-output* "Usage: ag-protoc [options] file.proto ...~%")
       (uiop:quit 1))
-    (when (and output-file (cdr args))
+    (when (and output-file (rest args))
       (format *error-output* "Error: Cannot use -o with multiple input files~%")
       (format *error-output* "Use --output-dir instead~%")
       (uiop:quit 1))

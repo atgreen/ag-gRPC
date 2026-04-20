@@ -25,7 +25,7 @@ Returns one of: :idle, :connecting, :ready, :transient-failure, :shutdown"
 
 (defun channel-ready-p (channel)
   "Return T if the channel is ready to make calls."
-  (eq (channel-state channel) :ready))
+  (eql (channel-state channel) :ready))
 
 ;;;; ========================================================================
 ;;;; Wait-for-Ready
@@ -104,7 +104,7 @@ PERMIT-WITHOUT-CALLS: Send pings even when idle (default NIL)"
   "Send a PING frame on the channel's HTTP/2 connection.
 Returns T if ping was sent successfully, NIL otherwise."
   (let ((conn (channel-connection channel)))
-    (when (and conn (eq (ag-http2:connection-state conn) :open))
+    (when (and conn (eql (ag-http2:connection-state conn) :open))
       (handler-case
           (progn
             (bt2:with-lock-held ((ag-http2:connection-write-lock conn))
@@ -202,7 +202,7 @@ Blocks if pool is full and all channels are in use."
           (push channel (pool-channels pool))
           (return-from pool-get-channel channel))))
     ;; Pool is full, return first channel (may need reconnection)
-    (car (pool-channels pool))))
+    (first (pool-channels pool))))
 
 (defun pool-release-channel (pool channel)
   "Release a channel back to the pool.

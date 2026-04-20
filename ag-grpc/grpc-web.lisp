@@ -133,7 +133,7 @@ Returns (values message trailer-p next-offset) or NIL if incomplete."
     (when (< remaining 5)
       (return-from grpc-web-parse-frame nil))
     (let* ((flags (aref data offset))
-           (len (logior (ash (aref data (+ offset 1)) 24)
+           (len (logior (ash (aref data (1+ offset)) 24)
                         (ash (aref data (+ offset 2)) 16)
                         (ash (aref data (+ offset 3)) 8)
                         (aref data (+ offset 4))))
@@ -219,7 +219,7 @@ EXPOSE-HEADERS: Headers exposed to browser (default: grpc-status, grpc-message)"
 (defun grpc-web-request-p (content-type)
   "Check if content-type indicates a gRPC-Web request."
   (and content-type
-       (or (search "grpc-web" content-type :test #'char-equal))))
+       (search "grpc-web" content-type :test (function char-equal))))
 
 (defun grpc-web-text-request-p (content-type)
   "Check if content-type indicates a base64 gRPC-Web request."
@@ -256,7 +256,7 @@ HEADERS: Alist of request headers"
          (request-data (if text-mode-p
                            (base64-decode body)
                            body))
-         (origin (cdr (assoc "origin" headers :test #'string-equal)))
+         (origin (rest (assoc "origin" headers :test #'string-equal)))
          (cors-headers (grpc-web-cors-headers handler origin)))
     ;; Parse the gRPC-Web frame
     (multiple-value-bind (message trailer-p next-offset)

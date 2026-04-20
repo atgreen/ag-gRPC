@@ -2,6 +2,7 @@
 
 (defpackage #:ag-http2
   (:use #:cl)
+  (:documentation "HTTP/2 protocol implementation")
   (:export
    ;; HPACK
    #:hpack-encoder

@@ -105,7 +105,7 @@ CLIENT-CERTIFICATE and CLIENT-KEY enable mTLS client authentication."
 (defun channel-connected-p (channel)
   "Return T if the channel has an active connection"
   (and (channel-connection channel)
-       (eq (ag-http2:connection-state (channel-connection channel)) :open)))
+       (eql (ag-http2:connection-state (channel-connection channel)) :open)))
 
 (defun channel-close (channel)
   "Close the channel and its connection"
@@ -132,10 +132,10 @@ connection alive through NAT/firewalls and detect dead connections."
                  (handler-case
                      (loop while (and (channel-keepalive-thread channel)
                                       conn
-                                      (eq (ag-http2:connection-state conn) :open))
+                                      (eql (ag-http2:connection-state conn) :open))
                            do (sleep interval)
                               (when (and (channel-keepalive-thread channel)
-                                         (eq (ag-http2:connection-state conn) :open))
+                                         (eql (ag-http2:connection-state conn) :open))
                                 (bt2:with-lock-held ((ag-http2:connection-write-lock conn))
                                   (ag-http2:write-frame
                                    (ag-http2:make-ping-frame

@@ -24,7 +24,8 @@
 (defclass data-frame (frame)
   ((data :initarg :data :accessor data-frame-data
          :documentation "Application data"))
-  (:default-initargs :type +frame-type-data+))
+  (:default-initargs :type +frame-type-data+)
+  (:documentation "HTTP/2 DATA frame"))
 
 (defclass headers-frame (frame)
   ((headers :initarg :headers :accessor headers-frame-headers
@@ -32,23 +33,27 @@
    (priority :initarg :priority :accessor headers-frame-priority
              :initform nil
              :documentation "Priority information if present"))
-  (:default-initargs :type +frame-type-headers+))
+  (:default-initargs :type +frame-type-headers+)
+  (:documentation "HTTP/2 HEADERS frame"))
 
 (defclass priority-frame (frame)
   ((exclusive :initarg :exclusive :accessor priority-frame-exclusive)
    (stream-dependency :initarg :stream-dependency :accessor priority-frame-stream-dependency)
    (weight :initarg :weight :accessor priority-frame-weight))
-  (:default-initargs :type +frame-type-priority+))
+  (:default-initargs :type +frame-type-priority+)
+  (:documentation "HTTP/2 PRIORITY frame"))
 
 (defclass rst-stream-frame (frame)
   ((error-code :initarg :error-code :accessor rst-stream-frame-error-code))
-  (:default-initargs :type +frame-type-rst-stream+))
+  (:default-initargs :type +frame-type-rst-stream+)
+  (:documentation "HTTP/2 RST_STREAM frame"))
 
 (defclass settings-frame (frame)
   ((settings :initarg :settings :accessor settings-frame-settings
              :initform nil
              :documentation "Alist of setting id to value"))
-  (:default-initargs :type +frame-type-settings+))
+  (:default-initargs :type +frame-type-settings+)
+  (:documentation "HTTP/2 SETTINGS frame"))
 
 (defun settings-frame-ack-p (frame)
   "Return T if SETTINGS frame has ACK flag set."
@@ -57,26 +62,31 @@
 (defclass push-promise-frame (frame)
   ((promised-stream-id :initarg :promised-stream-id :accessor push-promise-frame-promised-stream-id)
    (headers :initarg :headers :accessor push-promise-frame-headers))
-  (:default-initargs :type +frame-type-push-promise+))
+  (:default-initargs :type +frame-type-push-promise+)
+  (:documentation "HTTP/2 PUSH_PROMISE frame"))
 
 (defclass ping-frame (frame)
   ((opaque-data :initarg :opaque-data :accessor ping-frame-opaque-data))
-  (:default-initargs :type +frame-type-ping+))
+  (:default-initargs :type +frame-type-ping+)
+  (:documentation "HTTP/2 PING frame"))
 
 (defclass goaway-frame (frame)
   ((last-stream-id :initarg :last-stream-id :accessor goaway-frame-last-stream-id)
    (error-code :initarg :error-code :accessor goaway-frame-error-code)
    (debug-data :initarg :debug-data :accessor goaway-frame-debug-data :initform #()))
-  (:default-initargs :type +frame-type-goaway+))
+  (:default-initargs :type +frame-type-goaway+)
+  (:documentation "HTTP/2 GOAWAY frame"))
 
 (defclass window-update-frame (frame)
   ((window-size-increment :initarg :window-size-increment
                           :accessor window-update-frame-window-size-increment))
-  (:default-initargs :type +frame-type-window-update+))
+  (:default-initargs :type +frame-type-window-update+)
+  (:documentation "HTTP/2 WINDOW_UPDATE frame"))
 
 (defclass continuation-frame (frame)
   ((header-block :initarg :header-block :accessor continuation-frame-header-block))
-  (:default-initargs :type +frame-type-continuation+))
+  (:default-initargs :type +frame-type-continuation+)
+  (:documentation "HTTP/2 CONTINUATION frame"))
 
 ;;;; ========================================================================
 ;;;; Frame Serialization
@@ -132,9 +142,9 @@ Handles partial reads by retrying until complete or EOF."
                               (ash (aref header 7) 8)
                               (aref header 8)))
            (payload (make-array length :element-type '(unsigned-byte 8))))
-      (when (plusp length)
-        (when (/= length (read-full-sequence payload stream))
-          (error 'http2-frame-error :message "Incomplete frame payload")))
+      (when (and (plusp length)
+                 (/= length (read-full-sequence payload stream)))
+        (error 'http2-frame-error :message "Incomplete frame payload"))
       (make-frame-from-raw type flags stream-id payload))))
 
 (defun make-frame-from-raw (type flags stream-id payload)
@@ -166,7 +176,7 @@ Handles partial reads by retrying until complete or EOF."
      (make-instance 'rst-stream-frame
                     :flags flags :stream-id stream-id :payload payload
                     :error-code (parse-error-code-payload payload)))
-    (t
+    (otherwise
      (make-instance 'frame
                     :type type :flags flags :stream-id stream-id :payload payload))))
 
@@ -174,7 +184,7 @@ Handles partial reads by retrying until complete or EOF."
   "Parse a SETTINGS frame payload into an alist"
   (loop for i from 0 below (length payload) by 6
         collect (cons (logior (ash (aref payload i) 8)
-                              (aref payload (+ i 1)))
+                              (aref payload (1+ i)))
                       (logior (ash (aref payload (+ i 2)) 24)
                               (ash (aref payload (+ i 3)) 16)
                               (ash (aref payload (+ i 4)) 8)
@@ -206,7 +216,7 @@ Strips padding (if PADDED flag set) and priority data (if PRIORITY flag set)."
     ;; Handle PADDED flag - first byte is pad length
     (when padded-p
       (setf pad-length (aref payload 0))
-      (incf pos 1))
+      (incf pos))
     ;; Handle PRIORITY flag - 5 bytes of priority data
     (when priority-p
       (incf pos 5))
@@ -237,7 +247,7 @@ Strips padding (if PADDED flag set) and priority data (if PRIORITY flag set)."
     (loop for (id . value) in settings
           for i from 0 by 6
           do (setf (aref payload i) (ash id -8)
-                   (aref payload (+ i 1)) (logand id #xff)
+                   (aref payload (1+ i)) (logand id #xff)
                    (aref payload (+ i 2)) (ash value -24)
                    (aref payload (+ i 3)) (logand (ash value -16) #xff)
                    (aref payload (+ i 4)) (logand (ash value -8) #xff)

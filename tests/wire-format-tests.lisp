@@ -52,7 +52,7 @@
 
 (test zigzag-encode
   "Zigzag encoding maps signed to unsigned"
-  (is (= 0 (ag-proto:zigzag-encode 0)))
+  (is (zerop (ag-proto:zigzag-encode 0)))
   (is (= 1 (ag-proto:zigzag-encode -1)))
   (is (= 2 (ag-proto:zigzag-encode 1)))
   (is (= 3 (ag-proto:zigzag-encode -2)))
@@ -62,7 +62,7 @@
 
 (test zigzag-decode
   "Zigzag decoding maps unsigned to signed"
-  (is (= 0 (ag-proto:zigzag-decode 0)))
+  (is (zerop (ag-proto:zigzag-decode 0)))
   (is (= -1 (ag-proto:zigzag-decode 1)))
   (is (= 1 (ag-proto:zigzag-decode 2)))
   (is (= -2 (ag-proto:zigzag-decode 3)))

@@ -6,6 +6,8 @@
 ;;;;   1. Start the Go server: ./go-server/hello-server
 ;;;;   2. Run this script: sbcl --script test-client.lisp
 
+(in-package :cl-user)
+
 (require :asdf)
 
 ;; Configure ASDF to find our systems
@@ -33,6 +35,7 @@
 
 ;; Test unary RPC
 (defun test-unary (channel)
+  "Test a simple unary RPC call."
   (format t "~&~%=== Test 1: Unary RPC ===~%")
   (let ((request (make-instance 'hello-request :name "World")))
     (format t "~&Sending HelloRequest with name='World'...~%")
@@ -47,6 +50,7 @@
 
 ;; Test server streaming RPC
 (defun test-server-streaming (channel)
+  "Test a server streaming RPC call."
   (format t "~&~%=== Test 2: Server Streaming RPC ===~%")
   (let ((request (make-instance 'hello-request :name "Stream" :count 3)))
     (format t "~&Sending HelloRequest with name='Stream', count=3...~%")
@@ -67,6 +71,7 @@
 
 ;; Test client streaming RPC
 (defun test-client-streaming (channel)
+  "Test a client streaming RPC call."
   (format t "~&~%=== Test 3: Client Streaming RPC ===~%")
   (format t "~&Opening client stream...~%")
   (let ((stream (ag-grpc:call-client-streaming channel
@@ -94,6 +99,7 @@
 
 ;; Test bidirectional streaming RPC
 (defun test-bidirectional-streaming (channel)
+  "Test a bidirectional streaming RPC call."
   (format t "~&~%=== Test 4: Bidirectional Streaming RPC ===~%")
   (format t "~&Opening bidirectional stream...~%")
   (let ((stream (ag-grpc:call-bidirectional-streaming channel
@@ -141,6 +147,7 @@
 
 ;; Run all tests
 (defun run-interop-tests ()
+  "Run all interop tests against the Go gRPC server."
   (handler-case
       (let ((channel (ag-grpc:make-channel "localhost" 50051))
             (all-passed t))
@@ -160,13 +167,13 @@
                  (setf all-passed nil)))
           ;; Clean up
           (ag-grpc:channel-close channel))
-        (if all-passed
-            (progn
-              (format t "~&~%SUCCESS: All interop tests passed!~%")
-              t)
-            (progn
-              (format t "~&~%FAILED: Some tests failed~%")
-              nil)))
+        (cond
+          (all-passed
+           (format t "~&~%SUCCESS: All interop tests passed!~%")
+           t)
+          (t
+           (format t "~&~%FAILED: Some tests failed~%")
+           nil)))
     (error (e)
       (format t "~&~%ERROR: ~A~%" e)
       nil)))

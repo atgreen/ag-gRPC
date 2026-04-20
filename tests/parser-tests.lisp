@@ -34,7 +34,7 @@ message Person {
       (is (= 3 (length fields)))
       (let ((name-field (find "name" fields :key #'ag-proto:proto-field-name :test #'string=)))
         (is (not (null name-field)))
-        (is (eq :string (ag-proto:proto-field-type name-field)))
+        (is (eql :string (ag-proto:proto-field-type name-field)))
         (is (= 1 (ag-proto:proto-field-number name-field)))))))
 
 (test parse-repeated-field
@@ -47,7 +47,7 @@ message Numbers {
     (is (not (null file-desc)))
     (let* ((msg (first (ag-proto:proto-file-messages file-desc)))
            (field (first (ag-proto:proto-message-fields msg))))
-      (is (eq :repeated (ag-proto:proto-field-label field))))))
+      (is (eql :repeated (ag-proto:proto-field-label field))))))
 
 (test parse-enum
   "Parse an enum definition"
@@ -66,7 +66,7 @@ enum Status {
       (is (= 3 (length values)))
       (let ((unknown (find "UNKNOWN" values :key #'ag-proto:proto-enum-value-name :test #'string=)))
         (is (not (null unknown)))
-        (is (= 0 (ag-proto:proto-enum-value-number unknown)))))))
+        (is (zerop (ag-proto:proto-enum-value-number unknown)))))))
 
 (test parse-package
   "Parse package declaration"
@@ -179,9 +179,12 @@ message AllTypes {
            (fields (ag-proto:proto-message-fields msg)))
       (is (= 15 (length fields)))
       ;; Check a few types
-      (is (eq :double (ag-proto:proto-field-type (find "d" fields :key #'ag-proto:proto-field-name :test #'string=))))
-      (is (eq :string (ag-proto:proto-field-type (find "s" fields :key #'ag-proto:proto-field-name :test #'string=))))
-      (is (eq :bytes (ag-proto:proto-field-type (find "by" fields :key #'ag-proto:proto-field-name :test #'string=)))))))
+      (is (eql :double (ag-proto:proto-field-type (find "d" fields :key #'ag-proto:proto-field-name :test #'string=))))
+      (is (eql :string (ag-proto:proto-field-type (find "s" fields :key #'ag-proto:proto-field-name :test #'string=))))
+      (is (eql :bytes (ag-proto:proto-field-type
+                        (find "by" fields
+                              :key #'ag-proto:proto-field-name
+                              :test #'string=)))))))
 
 (test parse-map-field
   "Parse a message with map fields"
@@ -199,12 +202,12 @@ message Config {
       ;; Check the string->string map field
       (let ((labels-field (find "labels" fields :key #'ag-proto:proto-field-name :test #'string=)))
         (is (not (null labels-field)))
-        (is (eq :string (ag-proto:proto-field-map-key-type labels-field)))
-        (is (eq :string (ag-proto:proto-field-map-value-type labels-field)))
+        (is (eql :string (ag-proto:proto-field-map-key-type labels-field)))
+        (is (eql :string (ag-proto:proto-field-map-value-type labels-field)))
         (is (= 2 (ag-proto:proto-field-number labels-field))))
       ;; Check the int32->bool map field
       (let ((flags-field (find "flags" fields :key #'ag-proto:proto-field-name :test #'string=)))
         (is (not (null flags-field)))
-        (is (eq :int32 (ag-proto:proto-field-map-key-type flags-field)))
-        (is (eq :bool (ag-proto:proto-field-map-value-type flags-field)))
+        (is (eql :int32 (ag-proto:proto-field-map-key-type flags-field)))
+        (is (eql :bool (ag-proto:proto-field-map-value-type flags-field)))
         (is (= 3 (ag-proto:proto-field-number flags-field)))))))

@@ -103,7 +103,8 @@ TRIPPED-ERROR-CODES: List of gRPC codes that count as failures (nil = all)"
          ;; Enough successes, close the circuit
          (setf (breaker-failure-count breaker) 0)
          (setf (breaker-success-count breaker) 0)
-         (breaker-change-state breaker :closed))))))
+         (breaker-change-state breaker :closed)))
+      (otherwise nil))))
 
 (defun breaker-record-failure (breaker error)
   "Record a failed call."
@@ -121,7 +122,8 @@ TRIPPED-ERROR-CODES: List of gRPC codes that count as failures (nil = all)"
          ;; Any failure in half-open goes back to open
          (setf (breaker-success-count breaker) 0)
          (setf (breaker-last-failure-time breaker) (get-universal-time))
-         (breaker-change-state breaker :open))))))
+         (breaker-change-state breaker :open))
+        (otherwise nil)))))
 
 (defun breaker-allow-request-p (breaker)
   "Check if a request should be allowed through.
@@ -132,14 +134,13 @@ Returns T if allowed, NIL if circuit is open."
       (:open
        ;; Check if timeout has passed
        (let ((elapsed (- (get-universal-time) (breaker-last-failure-time breaker))))
-         (if (>= elapsed (breaker-timeout breaker))
-             (progn
-               ;; Transition to half-open, allow one request
-               (breaker-change-state breaker :half-open)
-               (setf (breaker-success-count breaker) 0)
-               t)
-             nil)))
-      (:half-open t))))  ; Allow requests in half-open to test
+         (cond ((>= elapsed (breaker-timeout breaker))
+                (breaker-change-state breaker :half-open)
+                (setf (breaker-success-count breaker) 0)
+                t)
+               (t nil))))
+      (:half-open t)
+      (otherwise nil))))  ; Allow requests in half-open to test
 
 ;;;; ========================================================================
 ;;;; Circuit Breaker Error
@@ -195,7 +196,7 @@ Example:
 Returns (values state failure-count success-count time-until-retry)."
   (bt:with-lock-held ((breaker-lock breaker))
     (let ((time-until-retry
-            (if (eq (breaker-state breaker) :open)
+            (if (eql (breaker-state breaker) :open)
                 (max 0 (- (breaker-timeout breaker)
                           (- (get-universal-time)
                              (breaker-last-failure-time breaker))))

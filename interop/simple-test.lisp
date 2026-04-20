@@ -1,5 +1,7 @@
 ;;;; simple-test.lisp - Simple interop test
 
+(in-package :cl-user)
+
 (require 'asdf)
 
 (asdf:initialize-source-registry

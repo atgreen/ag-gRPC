@@ -192,9 +192,9 @@ Reads and validates client preface, exchanges SETTINGS frames."
 (defun apply-remote-settings (conn settings)
   "Apply settings received from the remote peer"
   (dolist (setting settings)
-    (let ((id (car setting))
-          (value (cdr setting)))
-      (setf (cdr (assoc id (connection-remote-settings conn))) value)
+    (let ((id (first setting))
+          (value (rest setting)))
+      (setf (rest (assoc id (connection-remote-settings conn))) value)
       ;; Handle specific settings
       (case id
         (#.+settings-initial-window-size+
@@ -206,7 +206,8 @@ Reads and validates client preface, exchanges SETTINGS frames."
         (#.+settings-header-table-size+
          (setf (dynamic-table-max-size
                 (encoder-dynamic-table (connection-hpack-encoder conn)))
-               value))))))
+               value))
+        (otherwise nil)))))
 
 ;;;; ========================================================================
 ;;;; Sending Data
@@ -225,7 +226,7 @@ Reads and validates client preface, exchanges SETTINGS frames."
     (let ((stream (multiplexer-get-stream (connection-multiplexer conn) stream-id)))
       ;; Only transition if stream is idle (server responses on client-initiated
       ;; streams are already open from receiving client headers)
-      (when (eq (stream-state stream) :idle)
+      (when (eql (stream-state stream) :idle)
         (stream-transition stream :send-headers))
       (when end-stream
         (stream-transition stream :send-end-stream)))))
@@ -235,7 +236,7 @@ Reads and validates client preface, exchanges SETTINGS frames."
 Respects MAX_FRAME_SIZE and flow control windows, fragmenting if needed.
 Blocks on a condition variable when the flow control window is exhausted,
 waking when WINDOW_UPDATE frames arrive."
-  (let* ((max-frame-size (or (cdr (assoc +settings-max-frame-size+
+  (let* ((max-frame-size (or (rest (assoc +settings-max-frame-size+
                                           (connection-remote-settings conn)))
                              16384))  ; Default per RFC 7540
          (h2-stream (multiplexer-get-stream (connection-multiplexer conn) stream-id))
@@ -250,25 +251,26 @@ waking when WINDOW_UPDATE frames arrive."
                               (cs (min remaining max-frame-size))
                               (cs (min cs (window-size (connection-remote-window conn))))
                               (cs (min cs (stream-remote-window h2-stream))))
-                         (if (zerop cs)
-                             (progn
-                               (if (connection-reader-thread-active-p conn)
-                                   ;; A reader thread will process WINDOW_UPDATE and signal CV
-                                   (bt2:condition-wait (connection-flow-control-cv conn)
-                                                       (connection-flow-control-lock conn))
-                                   ;; No reader thread — read frames directly to get WINDOW_UPDATE
-                                   ;; (safe: we're the only thread on this connection)
-                                   (progn
-                                     (bt2:release-lock (connection-flow-control-lock conn))
-                                     (unwind-protect
-                                          (connection-read-frame conn)
-                                       (bt2:acquire-lock (connection-flow-control-lock conn)))))
-                               0)  ; retry after wake/read
-                             (progn
-                               ;; Reserve capacity under lock
-                               (window-consume (connection-remote-window conn) cs)
-                               (decf (stream-remote-window h2-stream) cs)
-                               cs))))))
+                         (cond
+                           ((zerop cs)
+                            (cond
+                              ((connection-reader-thread-active-p conn)
+                               (condition-wait
+                                (connection-flow-control-cv conn)
+                                (connection-flow-control-lock conn)))
+                              (t
+                               (release-lock
+                                (connection-flow-control-lock conn))
+                               (unwind-protect
+                                   (connection-read-frame conn)
+                                 (acquire-lock
+                                  (connection-flow-control-lock conn)))))
+                            0)
+                           (t
+                            (window-consume
+                             (connection-remote-window conn) cs)
+                            (decf (stream-remote-window h2-stream) cs)
+                            cs))))))
                (when (plusp chunk-size)
                  (let* ((chunk (subseq data offset (+ offset chunk-size)))
                         (is-last (and end-stream (= (+ offset chunk-size) data-length)))
@@ -346,23 +348,23 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
          (error 'http2-connection-error
                 :message "Received HEADERS while awaiting CONTINUATION"
                 :error-code +error-protocol-error+))
-       (if end-headers-p
-           ;; Complete header block - decode immediately
-           (let* ((decoder (connection-hpack-decoder conn))
-                  (header-block (extract-header-block frame))
-                  (headers (hpack-decode decoder header-block)))
-             (stream-transition stream :recv-headers)
-             (if (stream-headers stream)
-                 (setf (stream-trailers stream) headers)
-                 (setf (stream-headers stream) headers))
-             (when end-stream-p
-               (stream-transition stream :recv-end-stream)))
-           ;; Incomplete - buffer and wait for CONTINUATION
-           (progn
-             (setf (connection-pending-header-block conn)
-                   (extract-header-block frame))
-             (setf (connection-pending-header-stream-id conn) stream-id)
-             (setf (connection-pending-header-end-stream conn) end-stream-p)))))
+       (cond
+         (end-headers-p
+          (let* ((decoder (connection-hpack-decoder conn))
+                 (header-block (extract-header-block frame))
+                 (headers (hpack-decode decoder header-block)))
+            (stream-transition stream :recv-headers)
+            (if (stream-headers stream)
+                (setf (stream-trailers stream) headers)
+                (setf (stream-headers stream) headers))
+            (when end-stream-p
+              (stream-transition stream :recv-end-stream))))
+         (t
+          (setf (connection-pending-header-block conn)
+                (extract-header-block frame))
+          (setf (connection-pending-header-stream-id conn) stream-id)
+          (setf (connection-pending-header-end-stream conn)
+                end-stream-p)))))
     (continuation-frame
      (let* ((stream-id (frame-stream-id frame))
             (pending-block (connection-pending-header-block conn))
@@ -425,7 +427,8 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
        ;; Store the error code before closing the stream
        (when stream
          (setf (stream-rst-stream-error stream) error-code))
-       (multiplexer-close-stream (connection-multiplexer conn) stream-id)))))
+       (multiplexer-close-stream (connection-multiplexer conn) stream-id)))
+    (otherwise nil)))
 
 ;;;; ========================================================================
 ;;;; Connection Lifecycle
@@ -443,7 +446,7 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
            (funcall callback stream))))
      (multiplexer-streams mux)))
   ;; Set closing state BEFORE broadcast so woken senders see it
-  (when (eq (connection-state conn) :open)
+  (when (eql (connection-state conn) :open)
     (setf (connection-state conn) :closing)
     ;; Wake any senders blocked on flow control so they can exit
     (bt2:condition-broadcast (connection-flow-control-cv conn))

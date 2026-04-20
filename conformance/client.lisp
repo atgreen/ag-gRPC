@@ -24,6 +24,7 @@
 
 (defpackage #:conformance-client
   (:use #:cl)
+  (:documentation "Conformance test client for ag-gRPC.")
   (:import-from #:conformance-proto
                 ;; Message classes
                 #:client-compat-request
@@ -110,7 +111,8 @@ google.rpc.Status: int32 code (1), string message (2), repeated Any details (3)"
                  (0 (read-varint))  ; varint
                  (1 (incf pos 8))   ; 64-bit
                  (2 (read-length-delimited))  ; length-delimited
-                 (5 (incf pos 4))))) ; 32-bit
+                 (5 (incf pos 4))   ; 32-bit
+                 (otherwise nil))))
       (loop while (< pos len)
             do (let* ((tag (read-varint))
                       (field-number (ash tag -3))
@@ -134,7 +136,7 @@ google.rpc.Status: int32 code (1), string message (2), repeated Any details (3)"
   (let ((details-header (assoc "grpc-status-details-bin" trailers :test #'string-equal)))
     (when details-header
       (handler-case
-          (let* ((base64-data (cdr details-header))
+          (let* ((base64-data (rest details-header))
                  (decoded (base64-decode base64-data)))
             (parse-grpc-status-details decoded))
         (error (e)
@@ -146,6 +148,7 @@ google.rpc.Status: int32 code (1), string message (2), repeated Any details (3)"
 (defvar *log-stream* nil)
 
 (defun log-msg (fmt &rest args)
+  "Log a formatted message to stderr and optionally to a log file."
   ;; Always log to stderr for debugging
   (apply #'format *error-output* fmt args)
   (terpri *error-output*)
@@ -283,8 +286,8 @@ Returns (values response headers trailers status-code status-message)."
                (let ((raw-headers (ag-grpc::channel-receive-headers conn stream-id)))
                  ;; Check HTTP status
                  (let ((status-header (assoc :status raw-headers)))
-                   (unless (and status-header (string= (cdr status-header) "200"))
-                     (let ((http-status (if status-header (parse-integer (cdr status-header) :junk-allowed t) 0)))
+                   (unless (and status-header (string= (rest status-header) "200"))
+                     (let ((http-status (if status-header (parse-integer (rest status-header) :junk-allowed t) 0)))
                        (return-from do-receive
                          (values nil raw-headers raw-headers
                                  (ag-grpc::http-status-to-grpc-status (or http-status 0))
@@ -305,8 +308,8 @@ Returns (values response headers trailers status-code status-message)."
                        (let* ((status-trailer (assoc "grpc-status" raw-trailers :test #'string-equal))
                               (status-header (assoc "grpc-status" raw-headers :test #'string-equal))
                               (status-code (cond
-                                             (status-trailer (parse-integer (cdr status-trailer)))
-                                             (status-header (parse-integer (cdr status-header)))
+                                             (status-trailer (parse-integer (rest status-trailer)))
+                                             (status-header (parse-integer (rest status-header)))
                                              ;; If RST_STREAM with CANCEL and we had timeout, assume deadline exceeded
                                              ((and rst-error (= rst-error ag-http2:+error-cancel+) timeout-seconds)
                                               ag-grpc:+grpc-status-deadline-exceeded+)
@@ -317,10 +320,11 @@ Returns (values response headers trailers status-code status-message)."
                                                       :test #'string-equal))
                               (status-message (cond
                                                (message-trailer
-                                                (ag-grpc::percent-decode (cdr message-trailer)))
+                                                (ag-grpc::percent-decode (rest message-trailer)))
                                                ;; Add message for deadline exceeded from RST_STREAM
                                                ((and rst-error (= rst-error ag-http2:+error-cancel+) timeout-seconds)
-                                                "Deadline exceeded"))))
+                                                "Deadline exceeded")
+                                               (t nil))))
                        ;; Signal error if not OK
                        (unless (zerop status-code)
                          (error 'ag-grpc:grpc-status-error
@@ -652,7 +656,9 @@ ENCODING - Compression encoding to use."
 ;;; Bidirectional Streaming RPC
 ;;; ============================================================================
 
-(defun run-bidi-stream-call (conn service method request-messages codec metadata timeout-ms full-duplex &optional encoding)
+(defun run-bidi-stream-call (conn service method request-messages
+                             codec metadata timeout-ms full-duplex
+                             &optional encoding)
   "Execute a bidirectional streaming gRPC call.
 REQUEST-MESSAGES - List of request messages to send
 FULL-DUPLEX - If true, interleave sends and receives; otherwise send all then receive all
@@ -674,39 +680,32 @@ ENCODING - Compression encoding to use."
                      ;; Use handler-case inside to preserve collected responses on error
                      (handler-case
                          (progn
-                           (if full-duplex
-                               ;; Full duplex: interleave sends and receives
-                               (progn
-                                 (dolist (any-msg request-messages)
-                                   (let* ((request-data (slot-value any-msg 'conformance-proto::value))
-                                          (request (ag-proto:deserialize-from-bytes
-                                                    'conformance-proto::bidi-stream-request request-data)))
-                                     ;; Send request
-                                     (ag-grpc:stream-send stream request)
-                                     ;; Try to receive a response
-                                     (let ((response (ag-grpc:stream-read-message stream)))
-                                       (when response
-                                         (push response responses)))))
-                                 ;; Close send side
-                                 (ag-grpc:stream-close-send stream)
-                                 ;; Drain any remaining responses
-                                 (loop for response = (ag-grpc:stream-read-message stream)
-                                       while response
-                                       do (push response responses)))
-                               ;; Half duplex: send all, then receive all
-                               (progn
-                                 ;; Send all requests
-                                 (dolist (any-msg request-messages)
-                                   (let* ((request-data (slot-value any-msg 'conformance-proto::value))
-                                          (request (ag-proto:deserialize-from-bytes
-                                                    'conformance-proto::bidi-stream-request request-data)))
-                                     (ag-grpc:stream-send stream request)))
-                                 ;; Close send side
-                                 (ag-grpc:stream-close-send stream)
-                                 ;; Receive all responses
-                                 (loop for response = (ag-grpc:stream-read-message stream)
-                                       while response
-                                       do (push response responses))))
+                           (cond
+                             (full-duplex
+                              (dolist (any-msg request-messages)
+                                (let* ((request-data (slot-value any-msg 'value))
+                                       (request (deserialize-from-bytes
+                                                 'bidi-stream-request
+                                                 request-data)))
+                                  (stream-send stream request)
+                                  (let ((response (stream-read-message stream)))
+                                    (when response
+                                      (push response responses)))))
+                              (stream-close-send stream)
+                              (loop for response = (stream-read-message stream)
+                                    while response
+                                    do (push response responses)))
+                             (t
+                              (dolist (any-msg request-messages)
+                                (let* ((request-data (slot-value any-msg 'value))
+                                       (request (deserialize-from-bytes
+                                                 'bidi-stream-request
+                                                 request-data)))
+                                  (stream-send stream request)))
+                              (stream-close-send stream)
+                              (loop for response = (stream-read-message stream)
+                                    while response
+                                    do (push response responses))))
                            ;; Get final status (success case)
                            (let ((call (ag-grpc::stream-call stream)))
                              (log-msg "Bidi stream completed, got ~A responses, status=~A"
@@ -834,10 +833,10 @@ Handles edge cases where headers might be malformed."
     ;; First pass: group values by header name
     (let ((header-values (make-hash-table :test #'equal)))
       (loop for entry in headers
-            when (and (consp entry) (car entry))
+            when (and (consp entry) (first entry))
               do (handler-case
-                     (let* ((name (car entry))
-                            (value (cdr entry))
+                     (let* ((name (first entry))
+                            (value (rest entry))
                             ;; Convert keyword names to strings (e.g., :status -> ":status")
                             (name-str (cond
                                         ((keywordp name)
@@ -887,7 +886,7 @@ Handles edge cases where headers might be malformed."
                  ;; Convert compression enum to encoding string
                  (encoding (case compression
                              (2 "gzip")   ; COMPRESSION_GZIP
-                             (t nil)))    ; COMPRESSION_IDENTITY or unspecified
+                             (otherwise nil)))    ; COMPRESSION_IDENTITY or unspecified
                  (metadata (convert-request-headers request-headers test-name))
                  (conn (make-grpc-connection request)))
             ;; Set grpc-encoding header if using compression
@@ -906,13 +905,16 @@ Handles edge cases where headers might be malformed."
                                                     codec metadata timeout-ms cancel test-name encoding))
                   ;; Bidirectional streaming RPC (stream-type = 4)
                   (4 (execute-bidi-stream-request conn service method request-messages
-                                                  codec metadata timeout-ms cancel test-name encoding)))
+                                                  codec metadata timeout-ms cancel test-name encoding))
+                  (otherwise nil))
               (ag-grpc:channel-close conn))))
       (error (e)
         (make-error-response test-name
           (format nil "Client error: ~A" e))))))
 
-(defun execute-unary-request (conn service method request-messages codec metadata timeout-ms cancel test-name &optional encoding)
+(defun execute-unary-request (conn service method request-messages
+                              codec metadata timeout-ms cancel
+                              test-name &optional encoding)
   "Execute a unary RPC request."
   (multiple-value-bind (response headers trailers status-code status-msg)
       ;; Check if this is a cancellation test
@@ -944,7 +946,9 @@ Handles edge cases where headers might be malformed."
           (setf (slot-value result 'conformance-proto::proto-error) err)))
       (make-success-response test-name result))))
 
-(defun execute-server-stream-request (conn service method request-messages codec metadata timeout-ms cancel test-name &optional encoding)
+(defun execute-server-stream-request (conn service method request-messages
+                                      codec metadata timeout-ms cancel
+                                      test-name &optional encoding)
   "Execute a server streaming RPC request."
   (multiple-value-bind (responses headers trailers status-code status-msg)
       ;; Check if this is a cancellation test
@@ -952,11 +956,15 @@ Handles edge cases where headers might be malformed."
           (let ((timing-case (slot-value cancel 'conformance-proto::cancel-timing-case)))
             (case timing-case
               (:after-close-send-ms
-               (run-cancelled-server-stream-call conn service method request-messages metadata
-                                                 (slot-value cancel 'conformance-proto::after-close-send-ms) nil encoding))
+               (run-cancelled-server-stream-call
+                conn service method request-messages metadata
+                (slot-value cancel 'conformance-proto::after-close-send-ms)
+                nil encoding))
               (:after-num-responses
-               (run-cancelled-server-stream-call conn service method request-messages metadata
-                                                 nil (slot-value cancel 'conformance-proto::after-num-responses) encoding))
+               (run-cancelled-server-stream-call
+                conn service method request-messages metadata
+                nil (slot-value cancel 'conformance-proto::after-num-responses)
+                encoding))
               (otherwise
                ;; Default: immediate cancel after close-send
                (run-cancelled-server-stream-call conn service method request-messages metadata 0 nil encoding))))
@@ -982,7 +990,9 @@ Handles edge cases where headers might be malformed."
           (setf (slot-value result 'conformance-proto::proto-error) err)))
       (make-success-response test-name result))))
 
-(defun execute-client-stream-request (conn service method request-messages codec metadata timeout-ms cancel test-name &optional encoding)
+(defun execute-client-stream-request (conn service method request-messages
+                                      codec metadata timeout-ms cancel
+                                      test-name &optional encoding)
   "Execute a client streaming RPC request."
   (multiple-value-bind (response headers trailers status-code status-msg)
       ;; Check if this is a cancellation test
@@ -992,8 +1002,10 @@ Handles edge cases where headers might be malformed."
               (:before-close-send
                (run-cancelled-client-stream-call conn service method request-messages metadata t nil encoding))
               (:after-close-send-ms
-               (run-cancelled-client-stream-call conn service method request-messages metadata
-                                                 nil (slot-value cancel 'conformance-proto::after-close-send-ms) encoding))
+               (run-cancelled-client-stream-call
+                conn service method request-messages metadata
+                nil (slot-value cancel 'conformance-proto::after-close-send-ms)
+                encoding))
               (otherwise
                ;; Default: immediate cancel after close-send
                (run-cancelled-client-stream-call conn service method request-messages metadata nil 0 encoding))))
@@ -1017,7 +1029,9 @@ Handles edge cases where headers might be malformed."
           (setf (slot-value result 'conformance-proto::proto-error) err)))
       (make-success-response test-name result))))
 
-(defun execute-bidi-stream-request (conn service method request-messages codec metadata timeout-ms cancel test-name &optional encoding)
+(defun execute-bidi-stream-request (conn service method request-messages
+                                    codec metadata timeout-ms cancel
+                                    test-name &optional encoding)
   "Execute a bidirectional streaming RPC request."
   (multiple-value-bind (responses headers trailers status-code status-msg)
       ;; Check if this is a cancellation test
@@ -1027,11 +1041,16 @@ Handles edge cases where headers might be malformed."
               (:before-close-send
                (run-cancelled-bidi-stream-call conn service method request-messages metadata t nil nil encoding))
               (:after-close-send-ms
-               (run-cancelled-bidi-stream-call conn service method request-messages metadata
-                                               nil (slot-value cancel 'conformance-proto::after-close-send-ms) nil encoding))
+               (run-cancelled-bidi-stream-call
+                conn service method request-messages metadata
+                nil (slot-value cancel 'conformance-proto::after-close-send-ms)
+                nil encoding))
               (:after-num-responses
-               (run-cancelled-bidi-stream-call conn service method request-messages metadata
-                                               nil nil (slot-value cancel 'conformance-proto::after-num-responses) encoding))
+               (run-cancelled-bidi-stream-call
+                conn service method request-messages metadata
+                nil nil
+                (slot-value cancel 'conformance-proto::after-num-responses)
+                encoding))
               (otherwise
                ;; Default: immediate cancel after close-send
                (run-cancelled-bidi-stream-call conn service method request-messages metadata nil 0 nil encoding))))

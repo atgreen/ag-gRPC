@@ -161,7 +161,7 @@ Works with standard CL stream operations (write-byte, write-sequence)."
   "Read a byte from a sequence stream, return NIL on EOF.
 DEPRECATED: Use (read-byte stream nil nil) instead."
   (let ((byte (read-byte stream nil :eof)))
-    (if (eq byte :eof) nil byte)))
+    (if (eql byte :eof) nil byte)))
 
 (defun write-byte-to-seq-stream (byte stream)
   "Write a byte to a sequence stream.

@@ -110,7 +110,7 @@ Signals the last error if all attempts fail."
     ;; Return result or signal error
     (cond
       (result result)
-      (errors (error (car errors)))
+      (errors (error (first errors)))
       (t (error 'grpc-status-error
                 :code +grpc-status-unavailable+
                 :message "All hedged requests failed")))))
@@ -129,7 +129,7 @@ The _ placeholder will be replaced with each channel."
            (,channels-var ,channels-or-balancer))
        ;; Extract call parameters from the form
        (call-with-hedging ,policy-var ,channels-var
-                          ,@(cdr call-form)))))
+                          ,@(rest call-form)))))
 
 ;;;; ========================================================================
 ;;;; Simplified Hedged Call

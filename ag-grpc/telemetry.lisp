@@ -162,7 +162,7 @@ Returns (values trace-id span-id trace-flags) or NIL if not present."
           (values (second parts)   ; trace-id
                   (third parts)    ; span-id
                   (fourth parts))) ; flags
-        ))))
+))))
 
 (defun inject-trace-context (metadata trace-id span-id &optional (flags "01"))
   "Inject W3C trace context into gRPC metadata.

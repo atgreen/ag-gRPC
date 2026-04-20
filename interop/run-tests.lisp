@@ -19,6 +19,7 @@
 
 (defpackage #:interop-tests
   (:use #:cl)
+  (:documentation "gRPC interop conformance tests.")
   (:import-from #:cl-user
    ;; Message classes
    #:empty #:payload #:echostatus
@@ -47,6 +48,7 @@
 (defvar *tests-failed* 0)
 
 (defmacro define-test (name &body body)
+  "Define a named test that reports pass/fail status."
   `(defun ,name ()
      (format t "~%Running test: ~A... " ',name)
      (force-output)
@@ -60,11 +62,13 @@
          (incf *tests-failed*)))))
 
 (defmacro assert-equal (expected actual &optional msg)
+  "Assert that EXPECTED and ACTUAL are EQUAL, signaling an error otherwise."
   `(unless (equal ,expected ,actual)
      (error "~A~%  Expected: ~S~%  Got: ~S"
             (or ,msg "Assertion failed") ,expected ,actual)))
 
 (defmacro assert-true (expr &optional msg)
+  "Assert that EXPR evaluates to true, signaling an error otherwise."
   `(unless ,expr
      (error "~A: ~S is not true" (or ,msg "Assertion failed") ',expr)))
 
@@ -267,6 +271,7 @@
 ;;; ========================================================================
 
 (defun run-all-tests ()
+  "Run all interop conformance tests and report results."
   (setf *tests-passed* 0)
   (setf *tests-failed* 0)
 
@@ -291,13 +296,13 @@
           *tests-passed* *tests-failed*)
   (format t "========================================~%")
 
-  (if (zerop *tests-failed*)
-      (progn
-        (format t "~%All tests passed!~%")
-        (uiop:quit 0))
-      (progn
-        (format t "~%Some tests failed.~%")
-        (uiop:quit 1))))
+  (cond
+    ((zerop *tests-failed*)
+     (format t "~%All tests passed!~%")
+     (quit 0))
+    (t
+     (format t "~%Some tests failed.~%")
+     (quit 1))))
 
 ;; Run tests
 (run-all-tests)

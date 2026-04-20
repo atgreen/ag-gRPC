@@ -119,7 +119,7 @@ enum Status {
   ACTIVE = 1;
   INACTIVE = 2;
 }")
-  (is (= 0 +status-unknown+))
+  (is (zerop +status-unknown+))
   (is (= 1 +status-active+))
   (is (= 2 +status-inactive+)))
 
@@ -134,7 +134,7 @@ message Defaults {
 }")
   (let ((msg (make-instance 'defaults)))
     (is (string= "" (s msg)))
-    (is (= 0 (n msg)))
+    (is (zerop (n msg)))
     (is (null (b msg)))))
 
 (test codegen-skip-default
@@ -154,9 +154,9 @@ message Sparse {
     ;; Value 42 = 0x2a
     (is (<= (length bytes) 3))
     (let ((restored (ag-proto:deserialize-from-bytes 'sparse bytes)))
-      (is (= 0 (a restored)))
+      (is (zerop (a restored)))
       (is (= 42 (b restored)))
-      (is (= 0 (c restored))))))
+      (is (zerop (c restored))))))
 
 (test codegen-unknown-fields
   "Skip unknown fields during deserialization"
@@ -203,8 +203,8 @@ message TaggedItem {
          (restored (ag-proto:deserialize-from-bytes 'tagged-item bytes)))
     (is (string= "test" (name restored)))
     (is (= 2 (length (tags restored))))
-    (is (string= "prod" (cdr (assoc "env" (tags restored) :test #'string=))))
-    (is (string= "backend" (cdr (assoc "team" (tags restored) :test #'string=))))))
+    (is (string= "prod" (rest (assoc "env" (tags restored) :test #'string=))))
+    (is (string= "backend" (rest (assoc "team" (tags restored) :test #'string=))))))
 
 (test codegen-map-field-empty
   "Map field defaults to nil (empty)"
@@ -232,6 +232,6 @@ message IntMap {
          (bytes (ag-proto:serialize-to-bytes original))
          (restored (ag-proto:deserialize-from-bytes 'int-map bytes)))
     (is (= 3 (length (items restored))))
-    (is (string= "one" (cdr (assoc 1 (items restored)))))
-    (is (string= "two" (cdr (assoc 2 (items restored)))))
-    (is (string= "three" (cdr (assoc 3 (items restored)))))))
+    (is (string= "one" (rest (assoc 1 (items restored)))))
+    (is (string= "two" (rest (assoc 2 (items restored)))))
+    (is (string= "three" (rest (assoc 3 (items restored)))))))

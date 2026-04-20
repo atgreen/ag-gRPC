@@ -2,6 +2,7 @@
 
 (defpackage #:ag-grpc-tests
   (:use #:cl #:fiveam)
+  (:documentation "Test suite for ag-gRPC.")
   (:shadow #:run-all-tests)
   (:export
    #:run-tests

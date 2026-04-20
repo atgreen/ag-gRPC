@@ -32,7 +32,7 @@
     (#.+grpc-status-unavailable+ "UNAVAILABLE")
     (#.+grpc-status-data-loss+ "DATA_LOSS")
     (#.+grpc-status-unauthenticated+ "UNAUTHENTICATED")
-    (t (format nil "UNKNOWN_STATUS_~A" code))))
+    (otherwise (format nil "UNKNOWN_STATUS_~A" code))))
 
 (defun grpc-status-ok-p (code)
   "Return T if the status code indicates success"
@@ -51,7 +51,7 @@ Only specific codes have defined mappings; all others map to UNKNOWN."
     (502 +grpc-status-unavailable+)      ; Bad Gateway
     (503 +grpc-status-unavailable+)      ; Service Unavailable
     (504 +grpc-status-unavailable+)      ; Gateway Timeout
-    (t +grpc-status-unknown+)))
+    (otherwise +grpc-status-unknown+)))
 
 (defun rst-stream-error-to-grpc-status (error-code)
   "Map an HTTP/2 RST_STREAM error code to a gRPC status code.
@@ -64,7 +64,7 @@ Per gRPC spec, when RST_STREAM is received without grpc-status:
     (#.ag-http2:+error-refused-stream+ +grpc-status-unavailable+)
     (#.ag-http2:+error-enhance-your-calm+ +grpc-status-resource-exhausted+)
     (#.ag-http2:+error-inadequate-security+ +grpc-status-permission-denied+)
-    (t +grpc-status-internal+)))
+    (otherwise +grpc-status-internal+)))
 
 ;;;; ========================================================================
 ;;;; Status Error Condition

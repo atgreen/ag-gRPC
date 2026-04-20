@@ -160,15 +160,15 @@
   (when (null ast)
     (return-from transform-proto-ast nil))
   (let ((file-desc (make-instance 'proto-file-descriptor)))
-    (dolist (node (if (eq (car ast) :proto) (cdr ast) ast))
+    (dolist (node (if (eql (first ast) :proto) (rest ast) ast))
       (when (consp node)
-        (case (car node)
+        (case (first node)
           (:syntax
            (setf (proto-file-syntax file-desc) "proto3"))
           (:package
-           (setf (proto-file-package file-desc) (extract-full-ident (cdr node))))
+           (setf (proto-file-package file-desc) (extract-full-ident (rest node))))
           (:import
-           (push (extract-string-value (cdr node)) (proto-file-imports file-desc)))
+           (push (extract-string-value (rest node)) (proto-file-imports file-desc)))
           (:message
            (push (transform-message node nil) (proto-file-messages file-desc)))
           (:enum
@@ -179,9 +179,9 @@
            (push (transform-option node) (proto-file-options file-desc)))
           ;; Handle topLevelDef wrapper - unwrap and process inner node
           (:topLevelDef
-           (dolist (inner (cdr node))
+           (dolist (inner (rest node))
              (when (consp inner)
-               (case (car inner)
+               (case (first inner)
                  (:message
                   (push (transform-message inner nil) (proto-file-messages file-desc)))
                  (:enum
@@ -204,12 +204,12 @@
                ((stringp node)
                 (unless first (write-char #\. s))
                 (write-string node s))
-               ((and (consp node) (eq (car node) :ident))
+               ((and (consp node) (eql (first node) :ident))
                 (unless first (write-char #\. s))
                 (write-string (cadr node) s))
-               ((and (consp node) (eq (car node) :fullIdent))
+               ((and (consp node) (eql (first node) :fullIdent))
                 (unless first (write-char #\. s))
-                (write-string (extract-full-ident (cdr node)) s))))))
+                (write-string (extract-full-ident (rest node)) s))))))
 
 (defun extract-string-value (nodes)
   "Extract string content from strLit nodes"
@@ -217,11 +217,11 @@
     (dolist (node nodes)
       (cond
         ((stringp node) (write-string node s))
-        ((and (consp node) (member (car node) '(:dquoteStr :squoteStr :strLit
+        ((and (consp node) (member (first node) '(:dquoteStr :squoteStr :strLit
                                                 :dquoteContent :squoteContent)))
-         (write-string (extract-string-value (cdr node)) s))
-        ((and (consp node) (member (car node) '(:dquoteChar :squoteChar)))
-         (write-string (extract-string-value (cdr node)) s))))))
+         (write-string (extract-string-value (rest node)) s))
+        ((and (consp node) (member (first node) '(:dquoteChar :squoteChar)))
+         (write-string (extract-string-value (rest node)) s))))))
 
 (defun extract-int-value (node)
   "Extract integer value from intLit node"
@@ -237,7 +237,7 @@
              (char= (char node 0) #\0))
         (parse-integer node :radix 8))
        (t (parse-integer node))))
-    ((and (consp node) (member (car node) '(:intLit :decimalLit :hexLit :octalLit :fieldNumber)))
+    ((and (consp node) (member (first node) '(:intLit :decimalLit :hexLit :octalLit :fieldNumber)))
      (extract-int-value (cadr node)))
     (t 0)))
 
@@ -251,7 +251,7 @@
     ;; Process message body
     (dolist (child (find-body-children node))
       (when (consp child)
-        (case (car child)
+        (case (first child)
           (:field
            (push (transform-field child) (proto-message-fields msg-desc)))
           (:message
@@ -272,18 +272,18 @@
 
 (defun find-name-in-node (node)
   "Find the name identifier in a message/enum/service node"
-  (dolist (child (cdr node))
+  (dolist (child (rest node))
     (cond
       ((stringp child) (return-from find-name-in-node child))
-      ((and (consp child) (member (car child) '(:messageName :enumName :serviceName :ident)))
+      ((and (consp child) (member (first child) '(:messageName :enumName :serviceName :ident)))
        (return-from find-name-in-node (if (stringp (cadr child)) (cadr child) (find-name-in-node child))))))
   "Unknown")
 
 (defun find-body-children (node)
   "Find the body children in a message/enum/service node"
-  (dolist (child (cdr node))
-    (when (and (consp child) (member (car child) '(:messageBody :enumBody)))
-      (return-from find-body-children (cdr child))))
+  (dolist (child (rest node))
+    (when (and (consp child) (member (first child) '(:messageBody :enumBody)))
+      (return-from find-body-children (rest child))))
   nil)
 
 (defun transform-field (node)
@@ -293,10 +293,10 @@
         (type nil)
         (name nil)
         (number nil))
-    (dolist (child (cdr node))
+    (dolist (child (rest node))
       (cond
         ;; Handle fieldLabel node (from new grammar)
-        ((and (consp child) (eq (car child) :fieldLabel))
+        ((and (consp child) (eql (first child) :fieldLabel))
          (let ((label-str (cadr child)))
            (cond ((equal label-str "repeated") (setf label :repeated))
                  ((equal label-str "optional") (setf label :optional)))))
@@ -310,13 +310,13 @@
                             "bool" "string" "bytes") :test #'string=)
             (setf type (intern (string-upcase child) :keyword)))
            ((null name) (setf name child))))
-        ((and (consp child) (eq (car child) :type))
+        ((and (consp child) (eql (first child) :type))
          (setf type (extract-type child)))
-        ((and (consp child) (eq (car child) :fieldName))
+        ((and (consp child) (eql (first child) :fieldName))
          (setf name (find-name-in-node child)))
-        ((and (consp child) (eq (car child) :fieldNumber))
+        ((and (consp child) (eql (first child) :fieldNumber))
          (setf number (extract-int-value child)))
-        ((and (consp child) (member (car child) '(:intLit :decimalLit)))
+        ((and (consp child) (member (first child) '(:intLit :decimalLit)))
          (setf number (extract-int-value child)))))
     (setf (proto-field-name field-desc) (or name "unknown"))
     (setf (proto-field-number field-desc) (or number 0))
@@ -326,7 +326,7 @@
 
 (defun extract-key-type (node)
   "Extract key type from a keyType node"
-  (dolist (child (cdr node))
+  (dolist (child (rest node))
     (when (stringp child)
       (return-from extract-key-type (intern (string-upcase child) :keyword))))
   :string)
@@ -338,15 +338,15 @@
         (value-type nil)
         (name nil)
         (number nil))
-    (dolist (child (cdr node))
+    (dolist (child (rest node))
       (cond
-        ((and (consp child) (eq (car child) :keyType))
+        ((and (consp child) (eql (first child) :keyType))
          (setf key-type (extract-key-type child)))
-        ((and (consp child) (eq (car child) :type))
+        ((and (consp child) (eql (first child) :type))
          (setf value-type (extract-type child)))
-        ((and (consp child) (eq (car child) :mapName))
+        ((and (consp child) (eql (first child) :mapName))
          (setf name (find-name-in-node child)))
-        ((and (consp child) (eq (car child) :fieldNumber))
+        ((and (consp child) (eql (first child) :fieldNumber))
          (setf number (extract-int-value child)))
         ;; Handle bare strings that could be key types or value types
         ((stringp child)
@@ -366,7 +366,7 @@
 
 (defun extract-type (node)
   "Extract type from a type node"
-  (dolist (child (cdr node))
+  (dolist (child (rest node))
     (cond
       ((stringp child)
        (if (member child '("double" "float" "int32" "int64" "uint32" "uint64"
@@ -374,8 +374,8 @@
                            "bool" "string" "bytes") :test #'string=)
            (return-from extract-type (intern (string-upcase child) :keyword))
            (return-from extract-type child)))
-      ((and (consp child) (eq (car child) :messageType))
-       (return-from extract-type (extract-full-ident (cdr child))))))
+      ((and (consp child) (eql (first child) :messageType))
+       (return-from extract-type (extract-full-ident (rest child))))))
   :unknown)
 
 (defun transform-enum (node prefix)
@@ -386,7 +386,7 @@
                                    :name name
                                    :full-name full-name)))
     (dolist (child (find-body-children node))
-      (when (and (consp child) (eq (car child) :enumField))
+      (when (and (consp child) (eql (first child) :enumField))
         (push (transform-enum-value child) (proto-enum-values enum-desc))))
     (setf (proto-enum-values enum-desc) (nreverse (proto-enum-values enum-desc)))
     enum-desc))
@@ -396,15 +396,15 @@
   (let ((name nil)
         (number nil)
         (negative nil))
-    (dolist (child (cdr node))
+    (dolist (child (rest node))
       (cond
         ((stringp child)
          (cond
            ((string= child "-") (setf negative t))
            ((null name) (setf name child))))
-        ((and (consp child) (eq (car child) :ident))
+        ((and (consp child) (eql (first child) :ident))
          (setf name (cadr child)))
-        ((and (consp child) (member (car child) '(:intLit :decimalLit)))
+        ((and (consp child) (member (first child) '(:intLit :decimalLit)))
          (setf number (extract-int-value child)))))
     (make-instance 'proto-enum-value-descriptor
                    :name (or name "UNKNOWN")
@@ -416,8 +416,8 @@
          (svc-desc (make-instance 'proto-service-descriptor
                                   :name name
                                   :full-name name)))
-    (dolist (child (cdr node))
-      (when (and (consp child) (eq (car child) :rpc))
+    (dolist (child (rest node))
+      (when (and (consp child) (eql (first child) :rpc))
         (push (transform-rpc child) (proto-service-methods svc-desc))))
     (setf (proto-service-methods svc-desc) (nreverse (proto-service-methods svc-desc)))
     svc-desc))
@@ -431,7 +431,7 @@
         (server-streaming nil)
         (pending-stream nil)  ; true if we saw 'stream' and are waiting for messageType
         (type-count 0))       ; track which messageType we're on
-    (dolist (child (cdr node))
+    (dolist (child (rest node))
       (cond
         ((stringp child)
          (cond
@@ -439,11 +439,11 @@
             (setf pending-stream t))
            ((null name)
             (setf name child))))
-        ((and (consp child) (eq (car child) :rpcName))
+        ((and (consp child) (eql (first child) :rpcName))
          (setf name (find-name-in-node child)))
-        ((and (consp child) (eq (car child) :messageType))
+        ((and (consp child) (eql (first child) :messageType))
          (incf type-count)
-         (let ((type-name (extract-full-ident (cdr child))))
+         (let ((type-name (extract-full-ident (rest child))))
            (if (= type-count 1)
                (progn
                  (setf input-type type-name)
@@ -472,8 +472,8 @@ Also adds the oneof's fields to the message with oneof-index set."
                                     :index oneof-index))
          (fields nil))
     ;; Parse each oneofField in the oneof body
-    (dolist (child (cdr node))
-      (when (and (consp child) (eq (car child) :oneofField))
+    (dolist (child (rest node))
+      (when (and (consp child) (eql (first child) :oneofField))
         (let ((field (transform-oneof-field child oneof-index)))
           (push field fields)
           ;; Also add to message's fields list for serialization
@@ -483,10 +483,10 @@ Also adds the oneof's fields to the message with oneof-index set."
 
 (defun find-oneof-name (node)
   "Find the name in a oneof node"
-  (dolist (child (cdr node))
+  (dolist (child (rest node))
     (cond
       ((stringp child) (return-from find-oneof-name child))
-      ((and (consp child) (eq (car child) :oneofName))
+      ((and (consp child) (eql (first child) :oneofName))
        (return-from find-oneof-name (if (stringp (cadr child))
                                         (cadr child)
                                         (find-name-in-node child))))))
@@ -498,7 +498,7 @@ Also adds the oneof's fields to the message with oneof-index set."
         (type nil)
         (name nil)
         (number nil))
-    (dolist (child (cdr node))
+    (dolist (child (rest node))
       (cond
         ((stringp child)
          (cond
@@ -507,13 +507,13 @@ Also adds the oneof's fields to the message with oneof-index set."
                             "bool" "string" "bytes") :test #'string=)
             (setf type (intern (string-upcase child) :keyword)))
            ((null name) (setf name child))))
-        ((and (consp child) (eq (car child) :type))
+        ((and (consp child) (eql (first child) :type))
          (setf type (extract-type child)))
-        ((and (consp child) (eq (car child) :fieldName))
+        ((and (consp child) (eql (first child) :fieldName))
          (setf name (find-name-in-node child)))
-        ((and (consp child) (eq (car child) :fieldNumber))
+        ((and (consp child) (eql (first child) :fieldNumber))
          (setf number (extract-int-value child)))
-        ((and (consp child) (member (car child) '(:intLit :decimalLit)))
+        ((and (consp child) (member (first child) '(:intLit :decimalLit)))
          (setf number (extract-int-value child)))))
     (setf (proto-field-name field-desc) (or name "unknown"))
     (setf (proto-field-number field-desc) (or number 0))
@@ -526,29 +526,29 @@ Also adds the oneof's fields to the message with oneof-index set."
   "Transform an option parse node into a cons of (name . value)"
   (let ((name nil)
         (value nil))
-    (dolist (child (cdr node))
+    (dolist (child (rest node))
       (cond
-        ((and (consp child) (eq (car child) :optionName))
-         (setf name (extract-full-ident (cdr child))))
-        ((and (consp child) (eq (car child) :constant))
+        ((and (consp child) (eql (first child) :optionName))
+         (setf name (extract-full-ident (rest child))))
+        ((and (consp child) (eql (first child) :constant))
          (setf value (extract-constant-value child)))))
     (cons (or name "unknown") value)))
 
 (defun extract-constant-value (node)
   "Extract value from a constant node"
-  (dolist (child (cdr node))
+  (dolist (child (rest node))
     (cond
       ((stringp child)
        (cond
          ((string= child "true") (return-from extract-constant-value t))
          ((string= child "false") (return-from extract-constant-value nil))
          (t (return-from extract-constant-value child))))
-      ((and (consp child) (eq (car child) :strLit))
-       (return-from extract-constant-value (extract-string-value (cdr child))))
-      ((and (consp child) (member (car child) '(:intLit :floatLit :signedNumber)))
+      ((and (consp child) (eql (first child) :strLit))
+       (return-from extract-constant-value (extract-string-value (rest child))))
+      ((and (consp child) (member (first child) '(:intLit :floatLit :signedNumber)))
        (return-from extract-constant-value (extract-int-value child)))
-      ((and (consp child) (eq (car child) :fullIdent))
-       (return-from extract-constant-value (extract-full-ident (cdr child))))))
+      ((and (consp child) (eql (first child) :fullIdent))
+       (return-from extract-constant-value (extract-full-ident (rest child))))))
   nil)
 
 ;;;; ========================================================================

@@ -15,15 +15,19 @@
    ;; One of the following (oneof message_request):
    (file-by-filename :initarg :file-by-filename :accessor reflection-file-by-filename :initform nil)
    (file-containing-symbol :initarg :file-containing-symbol :accessor reflection-file-containing-symbol :initform nil)
-   (file-containing-extension :initarg :file-containing-extension :accessor reflection-file-containing-extension :initform nil)
-   (all-extension-numbers-of-type :initarg :all-extension-numbers-of-type :accessor reflection-all-extension-numbers :initform nil)
+   (file-containing-extension :initarg :file-containing-extension
+                              :accessor reflection-file-containing-extension
+                              :initform nil)
+   (all-extension-numbers-of-type :initarg :all-extension-numbers-of-type
+                                  :accessor reflection-all-extension-numbers
+                                  :initform nil)
    (list-services :initarg :list-services :accessor reflection-list-services :initform nil))
   (:documentation "Server reflection request message."))
 
 (defmethod ag-proto:deserialize-from-bytes ((type (eql 'server-reflection-request)) data)
   (let ((obj (make-instance 'server-reflection-request))
         (buffer (cons data 0)))
-    (loop while (< (cdr buffer) (length data))
+    (loop while (< (rest buffer) (length data))
           do (let* ((tag (ag-proto::read-varint buffer))
                     (field-number (ash tag -3))
                     (wire-type (logand tag 7)))

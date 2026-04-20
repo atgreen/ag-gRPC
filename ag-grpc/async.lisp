@@ -33,15 +33,15 @@
 
 (defun future-pending-p (future)
   "Return T if the future is still pending."
-  (eq (future-state future) :pending))
+  (eql (future-state future) :pending))
 
 (defun future-fulfilled-p (future)
   "Return T if the future was fulfilled successfully."
-  (eq (future-state future) :fulfilled))
+  (eql (future-state future) :fulfilled))
 
 (defun future-rejected-p (future)
   "Return T if the future was rejected with an error."
-  (eq (future-state future) :rejected))
+  (eql (future-state future) :rejected))
 
 (defun future-done-p (future)
   "Return T if the future is complete (fulfilled or rejected)."
@@ -56,9 +56,9 @@
       (bt:condition-notify (future-condition-var future))
       ;; Run success callbacks
       (dolist (cb (future-callbacks future))
-        (when (car cb)
+        (when (first cb)
           (handler-case
-              (funcall (car cb) result)
+              (funcall (first cb) result)
             (error () nil)))))))
 
 (defun future-reject (future error)
@@ -135,7 +135,8 @@ Returns a new future that resolves with the callback's return value."
           (:fulfilled
            (handle-success (future-result future)))
           (:rejected
-           (handle-error (future-error future))))))
+           (handle-error (future-error future)))
+          (otherwise nil))))
     next-future))
 
 (defun future-catch (future on-error)
@@ -309,5 +310,5 @@ or rejects with the last error if all fail."
                        (push error errors)
                        (when (and (future-pending-p result-future)
                                   (= (length errors) (length futures)))
-                         (future-reject result-future (car errors)))))))
+                         (future-reject result-future (first errors)))))))
     result-future))

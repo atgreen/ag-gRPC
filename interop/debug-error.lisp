@@ -1,5 +1,7 @@
 ;;;; debug-error.lisp - Debug error handling
 
+(in-package :cl-user)
+
 (require 'asdf)
 
 (asdf:initialize-source-registry

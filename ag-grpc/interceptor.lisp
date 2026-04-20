@@ -136,7 +136,8 @@ Returns the final (possibly modified) message."
                "[~A] RPC Complete: ~A (~,2Fms)~%"
                (get-universal-time)
                (getf handler-info :method-path)
-               elapsed-ms))))
+               elapsed-ms))
+      (t nil)))
   response)
 
 ;;; Timing/Metrics Interceptor
@@ -305,7 +306,8 @@ Returns the final (possibly modified) message."
                "[~A] RPC Complete: ~A (~,2Fms)~%"
                (get-universal-time)
                (getf call-info :method)
-               elapsed-ms))))
+               elapsed-ms))
+      (t nil)))
   response)
 
 ;;; Client Metrics Interceptor

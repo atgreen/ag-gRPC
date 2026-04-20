@@ -67,7 +67,7 @@ Preserves original condition in :cause slot (grpc-status-error-cause) for debugg
 Returns the encoding string (e.g., \"gzip\") or NIL if not present/identity."
   (let ((encoding-header (assoc "grpc-encoding" headers :test #'string-equal)))
     (when encoding-header
-      (let ((encoding (cdr encoding-header)))
+      (let ((encoding (rest encoding-header)))
         ;; "identity" means no compression, treat as nil
         (unless (string-equal encoding "identity")
           encoding)))))
@@ -200,10 +200,10 @@ The response is available via (call-response call)."
 Validates headers, receives body and trailers, extracts status."
     ;; Check initial response status
     (let ((status-header (assoc :status (call-response-headers call))))
-      (unless (and status-header (string= (cdr status-header) "200"))
+      (unless (and status-header (string= (rest status-header) "200"))
         ;; Map HTTP status code to gRPC status
         (let ((http-status (if status-header
-                               (parse-integer (cdr status-header) :junk-allowed t)
+                               (parse-integer (rest status-header) :junk-allowed t)
                                0)))
           (setf (call-status call)
                 (http-status-to-grpc-status (or http-status 0)))
@@ -217,7 +217,7 @@ Validates headers, receives body and trailers, extracts status."
     (let ((content-type-header (assoc "content-type" (call-response-headers call)
                                       :test #'string-equal)))
       (when content-type-header
-        (let ((content-type (cdr content-type-header)))
+        (let ((content-type (rest content-type-header)))
           (unless (or (string= content-type "application/grpc")
                       (and (>= (length content-type) 17)
                            (string= (subseq content-type 0 17) "application/grpc+")))
@@ -264,7 +264,7 @@ Validates headers, receives body and trailers, extracts status."
       (cond
         ;; Case 1: Status in trailers - always use this
         (status-trailer
-         (setf (call-status call) (parse-integer (cdr status-trailer))))
+         (setf (call-status call) (parse-integer (rest status-trailer))))
         ;; Case 2: Status in headers but we got a body - protocol error (ignore header status)
         ((and status-header has-body)
          ;; grpc-status in headers but body present = protocol error
@@ -274,7 +274,7 @@ Validates headers, receives body and trailers, extracts status."
         (status-header
          ;; Use the trailers from headers (copy them to trailers)
          (setf (call-response-trailers call) (call-response-headers call))
-         (setf (call-status call) (parse-integer (cdr status-header))))
+         (setf (call-status call) (parse-integer (rest status-header))))
         ;; Case 4: No status anywhere - protocol error
         (t
          (setf (call-status call) +grpc-status-internal+)
@@ -283,7 +283,7 @@ Validates headers, receives body and trailers, extracts status."
                                   :test #'string-equal)))
       (when message-trailer
         (setf (call-status-message call)
-              (percent-decode (cdr message-trailer)))))
+              (percent-decode (rest message-trailer)))))
     ;; Signal error if not OK
     (unless (grpc-status-ok-p (call-status call))
       (error 'grpc-status-error
@@ -396,9 +396,9 @@ Returns a grpc-server-stream object. Use stream-receive-message to get responses
       (setf (stream-headers-received-p server-stream) t)
       ;; Check HTTP status
       (let ((status-header (assoc :status raw-headers)))
-        (unless (and status-header (string= (cdr status-header) "200"))
+        (unless (and status-header (string= (rest status-header) "200"))
           (let ((http-status (if status-header
-                                 (parse-integer (cdr status-header) :junk-allowed t)
+                                 (parse-integer (rest status-header) :junk-allowed t)
                                  0)))
             (setf (stream-call-status server-stream)
                   (http-status-to-grpc-status (or http-status 0)))
@@ -429,17 +429,14 @@ After NIL is returned, use stream-call-status to check the final status."
          (encoding (get-response-encoding (stream-call-response-headers server-stream))))
     ;; Try to receive a message
     (let ((response-data (channel-receive-message channel stream-id encoding)))
-      (if response-data
-          ;; Got a message - deserialize and return
-          (if response-type
-              (ag-proto:deserialize-from-bytes response-type response-data)
-              response-data)
-          ;; No more messages - receive trailers, extract status, and clean up
-          (progn
-            (stream-finish server-stream)
-            ;; Cleanup trigger: stream exhausted
-            (finalize-client-stream server-stream)
-            nil)))))
+      (cond (response-data
+             (if response-type
+                 (deserialize-from-bytes response-type response-data)
+                 response-data))
+            (t
+             (stream-finish server-stream)
+             (finalize-client-stream server-stream)
+             nil)))))
 
 (defun stream-finish (server-stream)
   "Finish the stream by receiving trailers with timeout enforcement."
@@ -461,10 +458,10 @@ After NIL is returned, use stream-call-status to check the final status."
              (status-header (assoc "grpc-status" headers :test #'string-equal)))
         (cond
           (status-trailer
-           (setf (stream-call-status server-stream) (parse-integer (cdr status-trailer))))
+           (setf (stream-call-status server-stream) (parse-integer (rest status-trailer))))
           (status-header
            (setf (stream-call-response-trailers server-stream) headers)
-           (setf (stream-call-status server-stream) (parse-integer (cdr status-header))))
+           (setf (stream-call-status server-stream) (parse-integer (rest status-header))))
           (t
            (setf (stream-call-status server-stream) +grpc-status-internal+)
            (setf (stream-call-status-message server-stream) "missing grpc-status"))))
@@ -473,7 +470,7 @@ After NIL is returned, use stream-call-status to check the final status."
                                     :test #'string-equal)))
         (when message-trailer
           (setf (stream-call-status-message server-stream)
-                (percent-decode (cdr message-trailer)))))
+                (percent-decode (rest message-trailer)))))
       (setf (stream-finished-p server-stream) t)))
   server-stream)
 
@@ -495,13 +492,13 @@ After NIL is returned, use stream-call-status to check the final status."
 (defun call-metadata (call &optional key)
   "Get call response metadata. If KEY is provided, return just that value."
   (if key
-      (cdr (assoc key (call-response-headers call) :test #'string-equal))
+      (rest (assoc key (call-response-headers call) :test #'string-equal))
       (call-response-headers call)))
 
 (defun call-trailing-metadata (call &optional key)
   "Get call trailing metadata. If KEY is provided, return just that value."
   (if key
-      (cdr (assoc key (call-response-trailers call) :test #'string-equal))
+      (rest (assoc key (call-response-trailers call) :test #'string-equal))
       (call-response-trailers call)))
 
 ;;;; ========================================================================
@@ -665,7 +662,7 @@ Returns (values response status) where response is the deserialized message."
       (setf (call-response-headers call) raw-headers))
     ;; Check initial response status
     (let ((status-header (assoc :status (call-response-headers call))))
-      (unless (and status-header (string= (cdr status-header) "200"))
+      (unless (and status-header (string= (rest status-header) "200"))
         (setf (call-status call) +grpc-status-unknown+)
         (return-from stream-close-and-recv-internal
           (values nil (call-status call)))))
@@ -696,13 +693,13 @@ Returns (values response status) where response is the deserialized message."
                                  :test #'string-equal)))
       (setf (call-status call)
             (if status-trailer
-                (parse-integer (cdr status-trailer))
+                (parse-integer (rest status-trailer))
                 +grpc-status-ok+)))
     (let ((message-trailer (assoc "grpc-message" (call-response-trailers call)
                                   :test #'string-equal)))
       (when message-trailer
         (setf (call-status-message call)
-              (percent-decode (cdr message-trailer)))))
+              (percent-decode (rest message-trailer)))))
     ;; Signal error if not OK
     (unless (grpc-status-ok-p (call-status call))
       (error 'grpc-status-error
@@ -886,7 +883,7 @@ When the stream ends, also sets stream-status."
         (setf (call-response-headers call) raw-headers))
       ;; Check initial response status
       (let ((status-header (assoc :status (call-response-headers call))))
-        (unless (and status-header (string= (cdr status-header) "200"))
+        (unless (and status-header (string= (rest status-header) "200"))
           (setf (stream-status bidi-stream) +grpc-status-unknown+)
           (setf (bidi-stream-recv-finished-p bidi-stream) t)
           (return-from stream-read-message-internal nil))))
@@ -916,7 +913,7 @@ When the stream ends, also sets stream-status."
           (let ((status-trailer (assoc "grpc-status" trailers :test #'string-equal)))
             (setf (stream-status bidi-stream)
                   (if status-trailer
-                      (parse-integer (cdr status-trailer))
+                      (parse-integer (rest status-trailer))
                       +grpc-status-ok+))
             (setf (call-status call) (stream-status bidi-stream)))
           ;; Check for any remaining data in buffer
@@ -932,7 +929,7 @@ When the stream ends, also sets stream-status."
           (let ((message-trailer (assoc "grpc-message" trailers :test #'string-equal)))
             (when message-trailer
               (setf (call-status-message call)
-                    (percent-decode (cdr message-trailer)))))
+                    (percent-decode (rest message-trailer)))))
           ;; Mark stream as finished
           (setf (bidi-stream-recv-finished-p bidi-stream) t)
           ;; Signal error if not OK
@@ -976,7 +973,7 @@ Example:
     `(let ((,stream-var ,bidi-stream))
        (loop for ,var = (stream-read-message ,stream-var)
              while ,var
-             do (progn ,@body)
+             do ,@body
              finally (return ,result)))))
 
 ;;;; ========================================================================
