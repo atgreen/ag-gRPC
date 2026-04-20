@@ -4,7 +4,7 @@
   :description "CLI tool for generating Common Lisp code from Protocol Buffer files"
   :author "Anthony Green <green@moxielogic.com>"
   :license "MIT"
-  :version "1.4.0"
+  :version "1.5.0"
   :serial t
   :depends-on ("ag-proto" "clingon" "version-string")
   :pathname "ag-proto-cli"

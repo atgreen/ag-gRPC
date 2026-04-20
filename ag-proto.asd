@@ -4,7 +4,7 @@
   :description "Pure Common Lisp Protocol Buffers (Proto3) implementation"
   :author "Anthony Green <green@moxielogic.com>"
   :license "MIT"
-  :version "1.4.0"
+  :version "1.5.0"
   :serial t
   :depends-on ("iparse" "trivial-utf-8" "ieee-floats" "trivial-gray-streams")
   :pathname "ag-proto"
