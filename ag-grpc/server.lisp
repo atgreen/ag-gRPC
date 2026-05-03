@@ -527,7 +527,7 @@ If GRACEFUL is true, wait for active connections to finish."
       (return-from server-handle-data))
 
     (cond (msg-buffer
-           (let ((byte-buffer (stream-data-buffer h2-stream))
+           (let ((byte-buffer (ag-http2:stream-data-buffer h2-stream))
                  (request-encoding (context-request-encoding ctx)))
              (loop
                (multiple-value-bind (msg-data compressed consumed)
@@ -542,11 +542,11 @@ If GRACEFUL is true, wait for active connections to finish."
                    (setf (fill-pointer byte-buffer) 0)
                    (loop for byte across remaining
                          do (vector-push-extend byte byte-buffer))))))
-           (when (plusp (logand (frame-flags frame) +flag-end-stream+))
+           (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
              (buffer-close msg-buffer)))
           (t
-           (when (plusp (logand (frame-flags frame) +flag-end-stream+))
-             (let ((buffer (stream-data-buffer h2-stream)))
+           (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
+             (let ((buffer (ag-http2:stream-data-buffer h2-stream)))
                (server-dispatch-handler
                 server conn ctx handler buffer)))))))
 

@@ -165,11 +165,10 @@ INITIAL-STATUS: Initial status for the empty service name (server health).
     (server-register-handler server
                              "/grpc.health.v1.Health/Check"
                              (make-health-check-handler health)
-                             :unary
-                             'health-check-request)
+                             :request-type 'health-check-request)
     (server-register-handler server
                              "/grpc.health.v1.Health/Watch"
                              (make-health-watch-handler health)
-                             :server-streaming
-                             'health-check-request)
+                             :request-type 'health-check-request
+                             :server-streaming t)
     health))
