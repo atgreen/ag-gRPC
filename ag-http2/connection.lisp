@@ -259,11 +259,11 @@ waking when WINDOW_UPDATE frames arrive."
                                 (connection-flow-control-cv conn)
                                 (connection-flow-control-lock conn)))
                               (t
-                               (release-lock
+                               (bt:release-lock
                                 (connection-flow-control-lock conn))
                                (unwind-protect
                                    (connection-read-frame conn)
-                                 (acquire-lock
+                                 (bt:acquire-lock
                                   (connection-flow-control-lock conn)))))
                             0)
                            (t
