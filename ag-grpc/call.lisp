@@ -431,7 +431,7 @@ After NIL is returned, use stream-call-status to check the final status."
     (let ((response-data (channel-receive-message channel stream-id encoding)))
       (cond (response-data
              (if response-type
-                 (deserialize-from-bytes response-type response-data)
+                 (ag-proto:deserialize-from-bytes response-type response-data)
                  response-data))
             (t
              (stream-finish server-stream)

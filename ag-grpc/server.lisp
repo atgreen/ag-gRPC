@@ -535,7 +535,7 @@ If GRACEFUL is true, wait for active connections to finish."
                  (declare (ignore compressed))
                  (unless msg-data (return))
                  (let* ((request-type (handler-request-type handler))
-                        (message (deserialize-from-bytes
+                        (message (ag-proto:deserialize-from-bytes
                                   request-type msg-data)))
                    (buffer-push-message msg-buffer message))
                  (let ((remaining (subseq byte-buffer consumed)))
