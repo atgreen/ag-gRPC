@@ -255,7 +255,7 @@ waking when WINDOW_UPDATE frames arrive."
                            ((zerop cs)
                             (cond
                               ((connection-reader-thread-active-p conn)
-                               (condition-wait
+                               (bt2:condition-wait
                                 (connection-flow-control-cv conn)
                                 (connection-flow-control-lock conn)))
                               (t
