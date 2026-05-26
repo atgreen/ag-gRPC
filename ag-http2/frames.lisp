@@ -128,10 +128,17 @@ Handles partial reads by retrying until complete or EOF."
     total))
 
 (defun read-frame (stream)
-  "Read an HTTP/2 frame from a binary stream"
-  (let ((header (make-array 9 :element-type '(unsigned-byte 8))))
-    (when (/= 9 (read-full-sequence header stream))
-      (return-from read-frame nil))
+  "Read an HTTP/2 frame from a binary stream.
+Signals END-OF-FILE on a clean peer close (zero bytes available),
+HTTP2-FRAME-ERROR on a truncated header. Returning NIL here would
+strand callers in their read loops, busy-spinning on a dead socket."
+  (let* ((header (make-array 9 :element-type '(unsigned-byte 8)))
+         (header-bytes (read-full-sequence header stream)))
+    (cond
+      ((zerop header-bytes)
+       (error 'end-of-file :stream stream))
+      ((/= 9 header-bytes)
+       (error 'http2-frame-error :message "Truncated frame header")))
     (let* ((length (logior (ash (aref header 0) 16)
                            (ash (aref header 1) 8)
                            (aref header 2)))

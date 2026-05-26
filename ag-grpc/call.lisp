@@ -190,6 +190,17 @@ The response is available via (call-response call)."
                             :message "Cancelled"
                             :headers (call-response-headers call)
                             :trailers nil
+                            :cause c))
+                   ;; Peer closed the connection mid-call (read-frame sees EOF).
+                   ;; Map to UNAVAILABLE so callers can retry on a fresh channel.
+                   (end-of-file (c)
+                     (setf (call-status call) +grpc-status-unavailable+)
+                     (setf (call-status-message call) "Connection closed by peer")
+                     (error 'grpc-status-error
+                            :code +grpc-status-unavailable+
+                            :message "Connection closed by peer"
+                            :headers (call-response-headers call)
+                            :trailers nil
                             :cause c)))))
              call)
         ;; Always clean up context
