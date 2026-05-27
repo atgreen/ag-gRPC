@@ -4,7 +4,7 @@
   :description "Pure Common Lisp gRPC implementation"
   :author "Anthony Green <green@moxielogic.com>"
   :license "MIT"
-  :version "1.5.4"
+  :version "1.5.5"
   :serial t
   :depends-on ("ag-proto" "ag-http2" "version-string" "bordeaux-threads"
                "chipz" "salza2" "cl-cancel")
