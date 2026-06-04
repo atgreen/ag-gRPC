@@ -88,6 +88,30 @@
 When NIL, connection-send-data reads frames directly when flow control blocks."))
   (:documentation "HTTP/2 connection"))
 
+(defmethod initialize-instance :after ((conn http2-connection) &key)
+  ;; Propagate locally-advertised SETTINGS to the HPACK decoder so it can
+  ;; reject peer dynamic-table-size updates above SETTINGS_HEADER_TABLE_SIZE
+  ;; (RFC 7541 §6.3) and abort decoding when the cumulative header list
+  ;; exceeds SETTINGS_MAX_HEADER_LIST_SIZE — mitigation for the HTTP/2 Bomb
+  ;; class of attack (CVE-2026-49975).
+  (let ((decoder (connection-hpack-decoder conn))
+        (settings (connection-local-settings conn)))
+    (setf (decoder-max-table-size decoder)
+          (or (rest (assoc +settings-header-table-size+ settings)) 4096))
+    (setf (decoder-max-header-list-size decoder)
+          (or (rest (assoc +settings-max-header-list-size+ settings)) 8192))))
+
+(defun connection-pending-header-block-limit (conn)
+  "Maximum allowed size for an in-flight encoded header block (the initial
+HEADERS plus all queued CONTINUATION fragments). Capped at twice the
+locally-advertised SETTINGS_MAX_HEADER_LIST_SIZE, with a 16 KiB floor to keep
+small advertised values from rejecting legitimate large literal headers.
+Bounds the CONTINUATION-flood / HTTP/2-Bomb (CVE-2026-49975) memory footprint."
+  (let ((max-list (or (rest (assoc +settings-max-header-list-size+
+                                   (connection-local-settings conn)))
+                      8192)))
+    (max 16384 (* 2 max-list))))
+
 (defun make-client-connection (host port &key tls (verify nil) client-certificate client-key)
   "Create a new HTTP/2 client connection.
    If TLS is true, wrap the connection with TLS encryption.
@@ -360,8 +384,14 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
             (when end-stream-p
               (stream-transition stream :recv-end-stream))))
          (t
-          (setf (connection-pending-header-block conn)
-                (extract-header-block frame))
+          (let ((block (extract-header-block frame))
+                (limit (connection-pending-header-block-limit conn)))
+            (when (> (length block) limit)
+              (error 'http2-connection-error
+                     :message (format nil "HEADERS encoded block size ~D exceeds limit ~D"
+                                      (length block) limit)
+                     :error-code +error-enhance-your-calm+))
+            (setf (connection-pending-header-block conn) block))
           (setf (connection-pending-header-stream-id conn) stream-id)
           (setf (connection-pending-header-end-stream conn)
                 end-stream-p)))))
@@ -375,31 +405,36 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
          (error 'http2-connection-error
                 :message "Unexpected CONTINUATION frame"
                 :error-code +error-protocol-error+))
-       ;; Append to pending block
-       (let ((new-block (make-array (+ (length pending-block)
-                                        (length (frame-payload frame)))
-                                     :element-type '(unsigned-byte 8))))
-         (replace new-block pending-block)
-         (replace new-block (frame-payload frame) :start1 (length pending-block))
-         (if end-headers-p
-             ;; Complete - decode and clear pending
-             (let* ((stream (multiplexer-get-stream (connection-multiplexer conn) stream-id))
-                    (decoder (connection-hpack-decoder conn))
-                    (headers (hpack-decode decoder new-block))
-                    (end-stream-p (connection-pending-header-end-stream conn)))
-               (stream-transition stream :recv-headers)
-               (if (stream-headers stream)
-                   (setf (stream-trailers stream) headers)
-                   (setf (stream-headers stream) headers))
-               ;; Apply END_STREAM from original HEADERS frame
-               (when end-stream-p
-                 (stream-transition stream :recv-end-stream))
-               ;; Clear pending state
-               (setf (connection-pending-header-block conn) nil)
-               (setf (connection-pending-header-stream-id conn) nil)
-               (setf (connection-pending-header-end-stream conn) nil))
-             ;; Still incomplete - update pending block
-             (setf (connection-pending-header-block conn) new-block)))))
+       ;; Append to pending block, bounded against CONTINUATION-flood / HTTP/2 Bomb.
+       (let* ((combined-len (+ (length pending-block) (length (frame-payload frame))))
+              (limit (connection-pending-header-block-limit conn)))
+         (when (> combined-len limit)
+           (error 'http2-connection-error
+                  :message (format nil "Accumulated header block size ~D exceeds limit ~D"
+                                   combined-len limit)
+                  :error-code +error-enhance-your-calm+))
+         (let ((new-block (make-array combined-len :element-type '(unsigned-byte 8))))
+           (replace new-block pending-block)
+           (replace new-block (frame-payload frame) :start1 (length pending-block))
+           (if end-headers-p
+               ;; Complete - decode and clear pending
+               (let* ((stream (multiplexer-get-stream (connection-multiplexer conn) stream-id))
+                      (decoder (connection-hpack-decoder conn))
+                      (headers (hpack-decode decoder new-block))
+                      (end-stream-p (connection-pending-header-end-stream conn)))
+                 (stream-transition stream :recv-headers)
+                 (if (stream-headers stream)
+                     (setf (stream-trailers stream) headers)
+                     (setf (stream-headers stream) headers))
+                 ;; Apply END_STREAM from original HEADERS frame
+                 (when end-stream-p
+                   (stream-transition stream :recv-end-stream))
+                 ;; Clear pending state
+                 (setf (connection-pending-header-block conn) nil)
+                 (setf (connection-pending-header-stream-id conn) nil)
+                 (setf (connection-pending-header-end-stream conn) nil))
+               ;; Still incomplete - update pending block
+               (setf (connection-pending-header-block conn) new-block))))))
     (data-frame
      (let* ((stream-id (frame-stream-id frame))
             (stream (multiplexer-get-stream (connection-multiplexer conn) stream-id))

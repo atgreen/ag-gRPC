@@ -443,7 +443,17 @@ Handles both string and keyword names."
   (:documentation "HPACK encoder"))
 
 (defclass hpack-decoder ()
-  ((dynamic-table :initform (make-dynamic-table) :accessor decoder-dynamic-table))
+  ((dynamic-table :initform (make-dynamic-table) :accessor decoder-dynamic-table)
+   (max-table-size :initarg :max-table-size :initform 4096
+                   :accessor decoder-max-table-size
+                   :documentation "Locally-advertised SETTINGS_HEADER_TABLE_SIZE. A
+peer-sent dynamic-table-size update that exceeds this value is a decoding error
+per RFC 7541 §6.3.")
+   (max-header-list-size :initarg :max-header-list-size :initform 8192
+                         :accessor decoder-max-header-list-size
+                         :documentation "Locally-advertised SETTINGS_MAX_HEADER_LIST_SIZE.
+hpack-decode aborts if the cumulative decoded header list size (sum of
+name+value+32 per RFC 7541 §4.1) exceeds this. NIL disables the check."))
   (:documentation "HPACK decoder"))
 
 (defun make-hpack-encoder (&key (huffman nil) (table-size 4096))
@@ -452,10 +462,15 @@ Handles both string and keyword names."
   (make-instance 'hpack-encoder
                  :huffman huffman))
 
-(defun make-hpack-decoder (&key (table-size 4096))
-  "Create a new HPACK decoder"
-  (declare (ignore table-size))
-  (make-instance 'hpack-decoder))
+(defun make-hpack-decoder (&key (table-size 4096) (max-header-list-size 8192))
+  "Create a new HPACK decoder.
+TABLE-SIZE is the locally-advertised SETTINGS_HEADER_TABLE_SIZE; peer table-size
+updates above this are rejected (RFC 7541 §6.3). MAX-HEADER-LIST-SIZE is the
+locally-advertised SETTINGS_MAX_HEADER_LIST_SIZE; decoding aborts if the
+cumulative header list size exceeds it. Pass NIL to disable either check."
+  (make-instance 'hpack-decoder
+                 :max-table-size table-size
+                 :max-header-list-size max-header-list-size))
 
 ;;;; ========================================================================
 ;;;; Integer Encoding (RFC 7541 Section 5.1)
@@ -581,43 +596,69 @@ Handles both string and keyword names."
           return i))
 
 (defun hpack-decode (decoder bytes)
-  "Decode a header block. Returns a list of (name . value) pairs."
+  "Decode a header block. Returns a list of (name . value) pairs.
+
+Signals an HTTP2-CONNECTION-ERROR with +error-compression-error+ when:
+  - the decoded header list exceeds the decoder's MAX-HEADER-LIST-SIZE
+    (mitigation for the HTTP/2 Bomb / CVE-2026-49975 class of attack), or
+  - a peer-issued dynamic-table-size update exceeds the decoder's
+    MAX-TABLE-SIZE (RFC 7541 §6.3)."
   (let ((headers nil)
         (pos 0)
-        (len (length bytes)))
-    (loop while (< pos len)
-          do (let ((byte (aref bytes pos)))
-               (cond
-                 ;; Indexed header field (1xxxxxxx)
-                 ((logbitp 7 byte)
-                  (multiple-value-bind (index new-pos)
-                      (hpack-decode-integer 7 bytes pos)
-                    (push (hpack-get-indexed decoder index) headers)
-                    (setf pos new-pos)))
-                 ;; Literal header field with incremental indexing (01xxxxxx)
-                 ((= (logand byte #xc0) #x40)
-                  (multiple-value-bind (name value new-pos)
-                      (hpack-decode-literal decoder bytes pos 6)
-                    (push (cons name value) headers)
-                    (dynamic-table-add (decoder-dynamic-table decoder) name value)
-                    (setf pos new-pos)))
-                 ;; Dynamic table size update (001xxxxx)
-                 ((= (logand byte #xe0) #x20)
-                  (multiple-value-bind (new-size new-pos)
-                      (hpack-decode-integer 5 bytes pos)
-                    ;; Update the dynamic table max size
-                    (setf (dynamic-table-max-size (decoder-dynamic-table decoder)) new-size)
-                    ;; Evict entries if needed
-                    (let ((table (decoder-dynamic-table decoder)))
-                      (loop while (> (dynamic-table-size table) new-size)
-                            do (dynamic-table-evict table)))
-                    (setf pos new-pos)))
-                 ;; Literal without indexing (0000xxxx) or never indexed (0001xxxx)
-                 (t
-                  (multiple-value-bind (name value new-pos)
-                      (hpack-decode-literal decoder bytes pos 4)
-                    (push (cons name value) headers)
-                    (setf pos new-pos))))))
+        (len (length bytes))
+        (cumulative-size 0)
+        (max-list-size (and decoder (decoder-max-header-list-size decoder))))
+    (flet ((account (name value)
+             (let ((entry-size (+ 32 (hpack-header-name-length name) (length value))))
+               (incf cumulative-size entry-size)
+               (when (and max-list-size (> cumulative-size max-list-size))
+                 (error 'http2-connection-error
+                        :message (format nil "Decoded header list size ~D exceeds SETTINGS_MAX_HEADER_LIST_SIZE ~D"
+                                         cumulative-size max-list-size)
+                        :error-code +error-compression-error+)))))
+      (loop while (< pos len)
+            do (let ((byte (aref bytes pos)))
+                 (cond
+                   ;; Indexed header field (1xxxxxxx)
+                   ((logbitp 7 byte)
+                    (multiple-value-bind (index new-pos)
+                        (hpack-decode-integer 7 bytes pos)
+                      (let ((entry (hpack-get-indexed decoder index)))
+                        (account (first entry) (rest entry))
+                        (push entry headers))
+                      (setf pos new-pos)))
+                   ;; Literal header field with incremental indexing (01xxxxxx)
+                   ((= (logand byte #xc0) #x40)
+                    (multiple-value-bind (name value new-pos)
+                        (hpack-decode-literal decoder bytes pos 6)
+                      (account name value)
+                      (push (cons name value) headers)
+                      (dynamic-table-add (decoder-dynamic-table decoder) name value)
+                      (setf pos new-pos)))
+                   ;; Dynamic table size update (001xxxxx)
+                   ((= (logand byte #xe0) #x20)
+                    (multiple-value-bind (new-size new-pos)
+                        (hpack-decode-integer 5 bytes pos)
+                      (let* ((table (decoder-dynamic-table decoder))
+                             (limit (and decoder (decoder-max-table-size decoder))))
+                        ;; RFC 7541 §6.3: the new size MUST NOT exceed the limit
+                        ;; advertised by the decoder via SETTINGS_HEADER_TABLE_SIZE.
+                        (when (and limit (> new-size limit))
+                          (error 'http2-connection-error
+                                 :message (format nil "HPACK dynamic-table-size update ~D exceeds advertised SETTINGS_HEADER_TABLE_SIZE ~D"
+                                                  new-size limit)
+                                 :error-code +error-compression-error+))
+                        (setf (dynamic-table-max-size table) new-size)
+                        (loop while (> (dynamic-table-size table) new-size)
+                              do (dynamic-table-evict table)))
+                      (setf pos new-pos)))
+                   ;; Literal without indexing (0000xxxx) or never indexed (0001xxxx)
+                   (t
+                    (multiple-value-bind (name value new-pos)
+                        (hpack-decode-literal decoder bytes pos 4)
+                      (account name value)
+                      (push (cons name value) headers)
+                      (setf pos new-pos)))))))
     (nreverse headers)))
 
 (defun hpack-decode-literal (decoder bytes pos prefix-bits)
