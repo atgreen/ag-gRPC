@@ -184,8 +184,16 @@ Reads and validates client preface, exchanges SETTINGS frames."
   (let ((stream (connection-stream conn)))
     ;; Read and validate the client connection preface (24 bytes)
     (let ((preface (make-array 24 :element-type '(unsigned-byte 8))))
-      (let ((bytes-read (read-sequence preface stream)))
-        (unless (= bytes-read 24)
+      ;; The preface can arrive split across reads (e.g. a reverse proxy like
+      ;; Caddy doing h2c upstream, or TCP segmentation). A single READ-SEQUENCE
+      ;; may return short without EOF on buffered/TLS streams, so loop until the
+      ;; 24-byte preface is filled or the peer closes (no progress = EOF).
+      (let ((pos 0))
+        (loop while (< pos 24)
+              do (let ((n (read-sequence preface stream :start pos)))
+                   (when (= n pos) (return)) ; no progress => EOF
+                   (setf pos n)))
+        (unless (= pos 24)
           (error 'http2-connection-error
                  :message "Incomplete connection preface"
                  :error-code +error-protocol-error+)))
