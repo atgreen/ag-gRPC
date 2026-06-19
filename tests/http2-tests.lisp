@@ -37,3 +37,19 @@
    (lambda (stream)
      (signals ag-http2:http2-frame-error
        (ag-http2::read-frame stream)))))
+
+(test apply-remote-settings-ignores-unknown-ids
+  "RFC 7540 6.5.2: unknown SETTINGS identifiers must be ignored, not crash.
+   nghttp2/Caddy send id 9 (ENABLE_CONNECT_PROTOCOL); a missing alist entry
+   used to make (setf (rest (assoc ...)) ..) signal NIL-is-not-CONS."
+  (let ((conn (make-instance 'ag-http2::http2-connection)))
+    ;; Unknown id 9 must not error, and should be recorded.
+    (finishes (ag-http2::apply-remote-settings conn '((9 . 1))))
+    (is (eql 1 (cdr (assoc 9 (ag-http2::connection-remote-settings conn)))))
+    ;; A known setting still applies (header-table-size touches the hpack
+    ;; encoder, which is initialized by default).
+    (finishes
+      (ag-http2::apply-remote-settings
+       conn (list (cons ag-http2::+settings-header-table-size+ 8192))))
+    (is (eql 8192 (cdr (assoc ag-http2::+settings-header-table-size+
+                              (ag-http2::connection-remote-settings conn)))))))

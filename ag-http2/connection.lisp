@@ -184,8 +184,16 @@ Reads and validates client preface, exchanges SETTINGS frames."
   (let ((stream (connection-stream conn)))
     ;; Read and validate the client connection preface (24 bytes)
     (let ((preface (make-array 24 :element-type '(unsigned-byte 8))))
-      (let ((bytes-read (read-sequence preface stream)))
-        (unless (= bytes-read 24)
+      ;; The preface can arrive split across reads (e.g. a reverse proxy like
+      ;; Caddy doing h2c upstream, or TCP segmentation). A single READ-SEQUENCE
+      ;; may return short without EOF on buffered/TLS streams, so loop until the
+      ;; 24-byte preface is filled or the peer closes (no progress = EOF).
+      (let ((pos 0))
+        (loop while (< pos 24)
+              do (let ((n (read-sequence preface stream :start pos)))
+                   (when (= n pos) (return)) ; no progress => EOF
+                   (setf pos n)))
+        (unless (= pos 24)
           (error 'http2-connection-error
                  :message "Incomplete connection preface"
                  :error-code +error-protocol-error+)))
@@ -218,7 +226,16 @@ Reads and validates client preface, exchanges SETTINGS frames."
   (dolist (setting settings)
     (let ((id (first setting))
           (value (rest setting)))
-      (setf (rest (assoc id (connection-remote-settings conn))) value)
+      ;; RFC 7540 6.5.2: "An endpoint that receives a SETTINGS frame with any
+      ;; unknown or unsupported identifier MUST ignore that setting." (assoc)
+      ;; returns NIL for ids we don't pre-register (e.g. 8 NO_RFC7540_PRIORITIES,
+      ;; 9 ENABLE_CONNECT_PROTOCOL that nghttp2/Caddy send), and
+      ;; (setf (rest nil) ...) signalled "NIL is not of type CONS". Record
+      ;; unknown ids instead of crashing.
+      (let ((entry (assoc id (connection-remote-settings conn))))
+        (if entry
+            (setf (rest entry) value)
+            (push (cons id value) (connection-remote-settings conn))))
       ;; Handle specific settings
       (case id
         (#.+settings-initial-window-size+
@@ -283,11 +300,16 @@ waking when WINDOW_UPDATE frames arrive."
                                 (connection-flow-control-cv conn)
                                 (connection-flow-control-lock conn)))
                               (t
-                               (bt:release-lock
+                               ;; flow-control-lock is a bt2 lock; release/
+                               ;; acquire it with the matching bt2 API. (bt:
+                               ;; v1 release-lock expects a raw sb-thread:mutex
+                               ;; and signalled "BT2:LOCK is not of type
+                               ;; SB-THREAD:MUTEX".)
+                               (bt2:release-lock
                                 (connection-flow-control-lock conn))
                                (unwind-protect
                                    (connection-read-frame conn)
-                                 (bt:acquire-lock
+                                 (bt2:acquire-lock
                                   (connection-flow-control-lock conn)))))
                             0)
                            (t
