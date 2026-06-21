@@ -427,7 +427,13 @@ Properly handles UTF-8 encoded bytes."
           for char = (char string i)
           do (cond
                ((and (char= char #\%)
-                     (<= (+ i 2) len))
+                     ;; grpc-message is peer-supplied: only treat "%XX" as an
+                     ;; escape when two hex digits actually follow, otherwise
+                     ;; emit '%' literally. Avoids parse-integer signalling on a
+                     ;; truncated ("...%2") or non-hex ("...%ZZ") escape.
+                     (<= (+ i 3) len)
+                     (digit-char-p (char string (+ i 1)) 16)
+                     (digit-char-p (char string (+ i 2)) 16))
                 ;; Percent-encoded byte
                 (vector-push-extend (parse-integer string
                                                    :start (1+ i)
@@ -436,7 +442,7 @@ Properly handles UTF-8 encoded bytes."
                                     bytes)
                 (incf i 3))
                (t
-                ;; Plain ASCII character
+                ;; Plain ASCII character (including a bare/invalid '%')
                 (vector-push-extend (char-code char) bytes)
                 (incf i))))
     ;; Convert UTF-8 bytes to string

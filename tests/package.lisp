@@ -12,7 +12,8 @@
    #:codegen-tests
    #:hpack-tests
    #:http2-tests
-   #:grpc-tests))
+   #:grpc-tests
+   #:security-tests))
 
 (in-package #:ag-grpc-tests)
 
@@ -41,6 +42,11 @@
 
 (def-suite grpc-tests
   :description "gRPC protocol tests"
+  :in ag-grpc-all-tests)
+
+(def-suite security-tests
+  :description "Security regression reproducers (triage candidates; expected
+RED until the corresponding fixes land)"
   :in ag-grpc-all-tests)
 
 (defun run-tests ()

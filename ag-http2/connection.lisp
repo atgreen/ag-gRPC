@@ -28,6 +28,19 @@
   (:documentation "Error during frame parsing (incomplete or malformed frame)"))
 
 ;;;; ========================================================================
+;;;; Receive limits
+;;;; ========================================================================
+
+(defparameter *max-receive-buffer-size* (* 4 1024 1024)
+  "Maximum number of buffered-but-unconsumed request bytes per stream. A peer
+that streams DATA without END_STREAM (or declares a huge gRPC length and
+trickles the body) would otherwise grow the per-stream buffer without bound and
+exhaust memory, because the receiver replenishes its flow-control window as data
+is accepted. Once the buffered data for a stream exceeds this cap the connection
+is failed with ENHANCE_YOUR_CALM. Bind to NIL to disable. Default: 4 MB (the
+gRPC default max receive message size).")
+
+;;;; ========================================================================
 ;;;; HTTP/2 Connection
 ;;;; ========================================================================
 
@@ -351,7 +364,10 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
 
 (defun connection-read-frame (conn)
   "Read and process a frame from the connection"
-  (let ((frame (read-frame (connection-stream conn))))
+  (let ((frame (read-frame (connection-stream conn)
+                           (or (rest (assoc +settings-max-frame-size+
+                                            (connection-local-settings conn)))
+                               +default-max-frame-size+))))
     (when frame
       (process-frame conn frame))
     frame))
@@ -462,6 +478,16 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
             (stream (multiplexer-get-stream (connection-multiplexer conn) stream-id))
             (data-length (length (frame-payload frame))))
        (stream-append-data stream (frame-payload frame))
+       ;; Bound the buffered-but-unconsumed request data. Without this a peer
+       ;; can stream DATA forever (no END_STREAM) and exhaust memory, since the
+       ;; window is replenished below as data is accepted.
+       (when (and *max-receive-buffer-size*
+                  (> (length (stream-data-buffer stream)) *max-receive-buffer-size*))
+         (error 'http2-connection-error
+                :message (format nil "Stream ~D buffered ~D bytes exceeds max-receive-buffer-size ~D"
+                                 stream-id (length (stream-data-buffer stream))
+                                 *max-receive-buffer-size*)
+                :error-code +error-enhance-your-calm+))
        ;; Update local flow control windows and send WINDOW_UPDATE
        (when (plusp data-length)
          ;; Consume from local windows

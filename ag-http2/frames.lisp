@@ -127,11 +127,16 @@ Handles partial reads by retrying until complete or EOF."
                  (setf total read)))
     total))
 
-(defun read-frame (stream)
+(defun read-frame (stream &optional (max-frame-size +default-max-frame-size+))
   "Read an HTTP/2 frame from a binary stream.
 Signals END-OF-FILE on a clean peer close (zero bytes available),
 HTTP2-FRAME-ERROR on a truncated header. Returning NIL here would
-strand callers in their read loops, busy-spinning on a dead socket."
+strand callers in their read loops, busy-spinning on a dead socket.
+
+MAX-FRAME-SIZE is the receiver's advertised SETTINGS_MAX_FRAME_SIZE. RFC 7540
+4.2 requires rejecting a frame whose declared length exceeds it; the check
+happens BEFORE the payload is allocated so a 9-byte header cannot force a
+multi-megabyte (up to 2^24-1) allocation."
   (let* ((header (make-array 9 :element-type '(unsigned-byte 8)))
          (header-bytes (read-full-sequence header stream)))
     (cond
@@ -147,12 +152,18 @@ strand callers in their read loops, busy-spinning on a dead socket."
            (stream-id (logior (ash (logand (aref header 5) #x7f) 24)
                               (ash (aref header 6) 16)
                               (ash (aref header 7) 8)
-                              (aref header 8)))
-           (payload (make-array length :element-type '(unsigned-byte 8))))
-      (when (and (plusp length)
-                 (/= length (read-full-sequence payload stream)))
-        (error 'http2-frame-error :message "Incomplete frame payload"))
-      (make-frame-from-raw type flags stream-id payload))))
+                              (aref header 8))))
+      ;; RFC 7540 4.2: reject (FRAME_SIZE_ERROR) before allocating the payload.
+      (when (> length max-frame-size)
+        (error 'http2-frame-error
+               :message (format nil "Frame length ~D exceeds SETTINGS_MAX_FRAME_SIZE ~D"
+                                length max-frame-size)
+               :error-code +error-frame-size-error+))
+      (let ((payload (make-array length :element-type '(unsigned-byte 8))))
+        (when (and (plusp length)
+                   (/= length (read-full-sequence payload stream)))
+          (error 'http2-frame-error :message "Incomplete frame payload"))
+        (make-frame-from-raw type flags stream-id payload)))))
 
 (defun make-frame-from-raw (type flags stream-id payload)
   "Create an appropriate frame object from raw frame data"
