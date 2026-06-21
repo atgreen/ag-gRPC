@@ -33,6 +33,12 @@
 (defconstant +settings-max-frame-size+ #x5)
 (defconstant +settings-max-header-list-size+ #x6)
 
+;;; RFC 7540 4.2: the initial/minimum SETTINGS_MAX_FRAME_SIZE. A peer may not
+;;; send a frame larger than the value the receiver advertised; the default
+;;; (and floor) is 2^14. read-frame uses this to reject oversize frames before
+;;; allocating their payload (FRAME_SIZE_ERROR).
+(defconstant +default-max-frame-size+ 16384)
+
 ;;; Default settings values
 (defparameter *default-settings*
   `((,+settings-header-table-size+ . 4096)

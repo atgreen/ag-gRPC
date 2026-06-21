@@ -20,4 +20,5 @@
                (:file "codegen-tests")
                (:file "hpack-tests")
                (:file "http2-tests")
-               (:file "grpc-tests")))
+               (:file "grpc-tests")
+               (:file "security-tests")))
