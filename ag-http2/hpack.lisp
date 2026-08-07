@@ -412,15 +412,28 @@ Handles both string and keyword names."
       (length (string name))))  ; Convert keyword/symbol to string
 
 (defun dynamic-table-add (table name value)
-  "Add a header to the dynamic table"
+  "Add a header to the dynamic table.
+
+RFC 7541 4.4: it is NOT an error to attempt to add an entry larger than the
+maximum table size; doing so empties the table of all existing entries and
+results in an empty table (the entry is not added).  Handle that case
+explicitly -- otherwise the eviction loop keeps calling DYNAMIC-TABLE-EVICT
+after the table is already empty, dereferencing (AREF ENTRIES 0) on a
+zero-length vector and signalling an array-index error on peer-supplied
+headers.  CL-SEC-2026-0213."
   (let ((entry-size (+ 32 (hpack-header-name-length name) (length value))))
-    ;; Evict entries if needed
-    (loop while (> (+ (dynamic-table-size table) entry-size)
-                   (dynamic-table-max-size table))
-          do (dynamic-table-evict table))
-    ;; Add new entry at the front
-    (vector-push-extend (cons name value) (dynamic-table-entries table))
-    (incf (dynamic-table-size table) entry-size)))
+    (cond
+      ;; Entry cannot fit even in an empty table: empty the table, add nothing.
+      ((> entry-size (dynamic-table-max-size table))
+       (loop while (plusp (fill-pointer (dynamic-table-entries table)))
+             do (dynamic-table-evict table)))
+      (t
+       ;; Evict oldest entries until the new one fits, then add it at the front.
+       (loop while (> (+ (dynamic-table-size table) entry-size)
+                      (dynamic-table-max-size table))
+             do (dynamic-table-evict table))
+       (vector-push-extend (cons name value) (dynamic-table-entries table))
+       (incf (dynamic-table-size table) entry-size)))))
 
 (defun dynamic-table-evict (table)
   "Evict the oldest entry from the dynamic table"

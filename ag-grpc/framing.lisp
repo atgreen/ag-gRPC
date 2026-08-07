@@ -158,26 +158,57 @@ Returns a list of message data byte vectors."
 Prevents gzip bomb attacks where a small compressed payload expands to
 exhaust memory.  Set to NIL to disable the check.  Default: 16 MB.")
 
-(defun gzip-decompress (data)
-  "Decompress gzip DATA. Returns decompressed byte vector.
-Checks decompressed size during decompression to defend against gzip bombs."
-  ;; Ensure input is a simple array for chipz
+(defun bounded-inflate (data format)
+  "Decompress DATA (FORMAT is 'chipz:gzip or 'chipz:deflate) with peak output
+allocation bounded by *MAX-DECOMPRESSED-SIZE*.
+
+A decompression bomb (a small payload that expands ~1000:1) can no longer force
+a multi-gigabyte transient allocation.  Instead of decompressing fully and
+checking the length afterwards -- which must first materialize the entire
+output in memory -- this drives chipz incrementally into a fixed CAP+1 buffer
+and rejects the stream the instant its output would exceed the cap, so no more
+than CAP+1 bytes are ever committed.  Signals GRPC-ERROR when the limit is
+exceeded (or the stream is truncated/corrupt).  When *MAX-DECOMPRESSED-SIZE*
+is NIL the bound is disabled (unbounded, single-shot decompress).  CL-SEC-2026-0212."
   (let* ((simple-data (if (typep data '(simple-array (unsigned-byte 8) (*)))
                           data
-                          (let ((simple (make-array (length data) :element-type '(unsigned-byte 8))))
+                          (let ((simple (make-array (length data)
+                                                    :element-type '(unsigned-byte 8))))
                             (replace simple data)
-                            simple))))
-    (let ((result (chipz:decompress nil 'chipz:gzip simple-data)))
-      ;; Check decompressed size AFTER decompression but BEFORE returning
-      ;; chipz doesn't support streaming limits, so we check post-hoc
-      (when (and *max-decompressed-size*
-                 (> (length result) *max-decompressed-size*))
-        (error 'grpc-error
-               :message (format nil "Decompressed size ~D exceeds limit ~D bytes (gzip bomb defense)"
-                                (length result) *max-decompressed-size*)))
-      (if (typep result '(simple-array (unsigned-byte 8) (*)))
-          result
-          (coerce result '(simple-array (unsigned-byte 8) (*)))))))
+                            simple)))
+         (cap *max-decompressed-size*))
+    (if (null cap)
+        ;; Bound disabled: preserve the original single-shot behavior.
+        (let ((result (chipz:decompress nil format simple-data)))
+          (if (typep result '(simple-array (unsigned-byte 8) (*)))
+              result
+              (coerce result '(simple-array (unsigned-byte 8) (*)))))
+        ;; CAP+1 output buffer: chipz stops at output-full without erroring,
+        ;; returning (values consumed produced).  PRODUCED = CAP+1 means the
+        ;; decompressed data is at least CAP+1 bytes -> reject (bomb) having
+        ;; allocated only CAP+1 bytes.  If it stopped short of the cap but the
+        ;; stream never finished, FINISH-DSTATE signals (truncated/corrupt).
+        (let ((out (make-array (1+ cap) :element-type '(unsigned-byte 8)))
+              (state (chipz:make-dstate format)))
+          (multiple-value-bind (consumed produced)
+              (chipz:decompress out state simple-data)
+            (declare (ignore consumed))
+            (when (> produced cap)
+              (error 'grpc-error
+                     :message (format nil "Decompressed size exceeds limit ~D bytes (gzip bomb defense)"
+                                      cap)))
+            (handler-case (chipz:finish-dstate state)
+              (chipz:chipz-error ()
+                (error 'grpc-error
+                       :message (format nil "Decompressed stream is truncated or exceeds limit ~D bytes (gzip bomb defense)"
+                                        cap))))
+            (subseq out 0 produced))))))
+
+(defun gzip-decompress (data)
+  "Decompress gzip DATA. Returns decompressed byte vector.
+Bounds peak output allocation to *MAX-DECOMPRESSED-SIZE* during decompression
+(not post-hoc) to defend against gzip-bomb memory exhaustion.  CL-SEC-2026-0212."
+  (bounded-inflate data 'chipz:gzip))
 
 (defun decompress-grpc-message (data encoding)
   "Decompress a gRPC message body.
@@ -188,15 +219,7 @@ ENCODING is the compression algorithm name (e.g., \"gzip\", \"deflate\")."
     ((string= encoding "gzip")
      (gzip-decompress data))
     ((string= encoding "deflate")
-     (let ((result (chipz:decompress nil 'chipz:deflate data)))
-       (when (and *max-decompressed-size*
-                  (> (length result) *max-decompressed-size*))
-         (error 'grpc-error
-                :message (format nil "Decompressed size ~D exceeds limit ~D bytes (gzip bomb defense)"
-                                 (length result) *max-decompressed-size*)))
-       (if (typep result '(simple-array (unsigned-byte 8) (*)))
-           result
-           (coerce result '(simple-array (unsigned-byte 8) (*))))))
+     (bounded-inflate data 'chipz:deflate))
     (t
      (error 'grpc-error
             :message (format nil "Unknown compression: ~A" encoding)))))

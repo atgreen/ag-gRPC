@@ -118,3 +118,71 @@
   (finishes (ag-grpc::percent-decode "ok%2"))   ; truncated: only one hex digit
   (finishes (ag-grpc::percent-decode "ok%ZZ"))  ; non-hex escape
   (finishes (ag-grpc::percent-decode "trailing%"))) ; bare percent at end
+
+;;;; ------------------------------------------------------------------------
+;;;; MEDIUM (CL-SEC-2026-0212) — decompression must be bounded during, not
+;;;; after, inflation (gzip/deflate bomb defense)
+;;;; ------------------------------------------------------------------------
+
+(test decompression-is-bounded-by-max-decompressed-size
+  "A compressed gRPC request/response body is inflated on the receiving side
+   (ag-grpc/framing.lisp, decode-grpc-message -> decompress-grpc-message).
+   The prior implementation inflated the *entire* payload with a single
+   (chipz:decompress nil ...) call and only compared the result length to
+   *max-decompressed-size* afterwards, so a small gzip bomb (~1000:1) could
+   force a multi-gigabyte transient allocation before the check fired
+   (CL-SEC-2026-0212).
+
+   Secure behavior asserted: bounded-inflate enforces the cap *during*
+   decompression -- output over the cap is rejected with grpc-error, output
+   at/under the cap round-trips byte-for-byte, and the peak buffer is CAP+1
+   (validated by construction; a unit test cannot directly observe peak
+   allocation)."
+  (let ((ag-grpc::*max-decompressed-size* 1024))
+    ;; Over the cap: 4096 zero bytes decompresses past 1024 -> must signal.
+    (let* ((payload (make-array 4096 :element-type '(unsigned-byte 8)
+                                     :initial-element 0))
+           (compressed (ag-grpc::gzip-compress payload)))
+      (signals ag-grpc::grpc-error (ag-grpc::gzip-decompress compressed)))
+    ;; At/under the cap: must decompress cleanly and exactly.
+    (let* ((payload (make-array 512 :element-type '(unsigned-byte 8)
+                                    :initial-element 65))
+           (compressed (ag-grpc::gzip-compress payload)))
+      (is (equalp payload (ag-grpc::gzip-decompress compressed))))))
+
+;;;; ------------------------------------------------------------------------
+;;;; LOW (CL-SEC-2026-0213) — HPACK: adding an over-max dynamic-table entry
+;;;; must empty the table (RFC 7541 4.4), not crash
+;;;; ------------------------------------------------------------------------
+
+(test hpack-oversize-dynamic-entry-does-not-crash
+  "RFC 7541 4.4: attempting to add a dynamic-table entry larger than the table
+   maximum is NOT an error -- it empties the table and adds nothing.  A literal
+   header with incremental indexing (0x40) whose name+value size sits between
+   HEADER_TABLE_SIZE (default 4096) and MAX_HEADER_LIST_SIZE (default 8192)
+   passes the header-list accounting yet exceeds the table max, so
+   dynamic-table-add evicted every entry and then called dynamic-table-evict
+   on an empty vector -> (aref entries 0) out of bounds on peer-supplied
+   headers (CL-SEC-2026-0213).
+
+   Secure behavior asserted: hpack-decode returns the header without signalling,
+   and the oversized entry is not retained in the dynamic table."
+  (let* ((decoder (ag-http2::make-hpack-decoder))
+         (value-len 5000)                 ; entry-size = 32 + 1 + 5000 = 5033
+         (out (make-array 16 :element-type '(unsigned-byte 8)
+                             :fill-pointer 0 :adjustable t)))
+    ;; 0x40: literal header field with incremental indexing, name index 0
+    ;; (new name follows as a string).
+    (vector-push-extend #x40 out)
+    ;; Name string: length 1, "x" (top bit clear -> not Huffman).
+    (vector-push-extend 1 out)
+    (vector-push-extend (char-code #\x) out)
+    ;; Value string: length 5000 as a 7-bit-prefix HPACK integer, then bytes.
+    (ag-http2::hpack-encode-integer value-len 7 out)
+    (dotimes (i value-len) (vector-push-extend (char-code #\a) out))
+    (let (headers)
+      (finishes (setf headers (ag-http2::hpack-decode decoder out)))
+      (is (equal "x" (car (first headers))))
+      ;; RFC 7541 4.4: table emptied, entry not added.
+      (is (zerop (length (ag-http2::dynamic-table-entries
+                          (ag-http2::decoder-dynamic-table decoder))))))))
