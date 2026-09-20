@@ -46,21 +46,25 @@ connected and then went away."
 
 (defun server-closed-connection-p (socket &key (timeout 5))
   "T if the server closes SOCKET within TIMEOUT seconds.
-Drains any farewell frames (GOAWAY) the server sends before the close."
-  (let ((stream (usocket:socket-stream socket))
-        (deadline (+ (get-internal-real-time)
-                     (* timeout internal-time-units-per-second))))
-    (loop
-      (let ((remaining (/ (- deadline (get-internal-real-time))
-                          internal-time-units-per-second)))
-        (when (<= remaining 0)
-          (return nil))
-        (unless (usocket:wait-for-input socket :timeout remaining :ready-only t)
-          (return nil))
-        (handler-case
-            (when (eq :eof (read-byte stream nil :eof))
-              (return t))
-          (error () (return t)))))))
+Drains any farewell frames (GOAWAY) the server sends before the close.
+
+The read runs in a helper thread and the caller watches the clock, because a
+blocking read is the only close-detection that behaves the same everywhere:
+usocket's Windows backend registers stream sockets for FD_READ alone and
+decides readiness with FIONREAD, so a peer's close never wakes
+WAIT-FOR-INPUT there. If the server never closes, the helper stays parked in
+the read until the caller closes the socket on its way out."
+  (let* ((stream (usocket:socket-stream socket))
+         (closed nil)
+         (reader (bt:make-thread
+                  (lambda ()
+                    (handler-case
+                        (loop until (eq :eof (read-byte stream nil :eof))
+                              finally (setf closed t))
+                      (error () nil)))
+                  :name "close-watcher")))
+    (and (wait-for-thread-exit reader :timeout timeout)
+         closed)))
 
 ;;;; ------------------------------------------------------------------
 ;;;; Tests
