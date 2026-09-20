@@ -197,3 +197,53 @@ connection slot with it."
                         (1+ i) response)))
              (ignore-errors (ag-grpc:channel-close channel))))
       (stop-test-server server thread))))
+
+(test server-streaming-connection-outlives-the-idle-timeout
+  "A server-streaming RPC keeps its connection alive while the client is quiet.
+
+The reaper must exempt a connection with work in flight, or it breaks exactly
+the workload that benefits most from a long-lived stream: cave's runners hold
+a WatchTasks stream open and then say nothing until the server pushes them a
+job, so their connections can carry no frames for minutes at a time."
+  (multiple-value-bind (server thread port)
+      (start-test-server :connection-idle-timeout 1)
+    ;; A handler in the shape of WatchTasks: parks, sends nothing, and notices
+    ;; if its connection is taken away underneath it.
+    (let ((closed-early nil))
+      (ag-grpc:server-register-handler
+       server "/test.Watch/Tasks"
+       (lambda (request ctx stream)
+         (declare (ignore request))
+         (loop repeat 40
+               do (when (ag-grpc:context-check-cancelled ctx)
+                    (setf closed-early :cancelled)
+                    (return))
+                  (let ((conn (ignore-errors (ag-grpc::server-stream-connection stream))))
+                    (when (and conn (member (ag-http2:connection-state conn)
+                                            '(:closing :closed)))
+                      (setf closed-early (ag-http2:connection-state conn))
+                      (return)))
+                  (sleep 0.25)))
+       :request-type 'ag-grpc:health-check-request
+       :response-type 'ag-grpc:health-check-response
+       :server-streaming t)
+      (unwind-protect
+           (let ((channel (ag-grpc:make-channel "127.0.0.1" port :timeout nil)))
+             (unwind-protect
+                  (progn
+                    (ag-grpc:call-server-stream
+                     channel "/test.Watch/Tasks"
+                     (make-instance 'ag-grpc:health-check-request :service "")
+                     :response-type 'ag-grpc:health-check-response)
+                    ;; Stay quiet for several idle timeouts.
+                    (sleep 4)
+                    (is-false closed-early
+                              "a connection with a stream in flight must not be reaped, got ~A"
+                              closed-early)
+                    (let ((conns (ag-grpc::server-connections server)))
+                      (is (= 1 (length conns))
+                          "the connection should still be open")
+                      (is (plusp (ag-http2:connection-active-streams (first conns)))
+                          "the open stream should still be counted in flight")))
+               (ignore-errors (ag-grpc:channel-close channel))))
+        (stop-test-server server thread)))))
