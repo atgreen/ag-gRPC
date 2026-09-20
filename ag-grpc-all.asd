@@ -21,4 +21,5 @@
                (:file "hpack-tests")
                (:file "http2-tests")
                (:file "grpc-tests")
+               (:file "server-tests")
                (:file "security-tests")))

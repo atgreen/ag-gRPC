@@ -165,6 +165,7 @@
    #:server-stop
    #:server-state
    #:server-register-handler
+   #:server-connection-idle-timeout
    #:with-grpc-server
 
    ;; Call context

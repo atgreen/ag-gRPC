@@ -13,6 +13,7 @@
    #:hpack-tests
    #:http2-tests
    #:grpc-tests
+   #:server-tests
    #:security-tests))
 
 (in-package #:ag-grpc-tests)
@@ -42,6 +43,10 @@
 
 (def-suite grpc-tests
   :description "gRPC protocol tests"
+  :in ag-grpc-all-tests)
+
+(def-suite server-tests
+  :description "Server lifecycle and liveness tests"
   :in ag-grpc-all-tests)
 
 (def-suite security-tests

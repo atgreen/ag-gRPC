@@ -63,3 +63,8 @@
 (defconstant +error-enhance-your-calm+ #xb)
 (defconstant +error-inadequate-security+ #xc)
 (defconstant +error-http-1-1-required+ #xd)
+
+;;; Connection shutdown
+;;; How long CONNECTION-CLOSE waits for the write lock before giving up on the
+;;; farewell GOAWAY and closing the socket anyway.
+(defconstant +goaway-lock-timeout+ 1)

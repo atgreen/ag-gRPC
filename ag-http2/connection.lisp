@@ -518,29 +518,35 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
 ;;;; ========================================================================
 
 (defun connection-close (conn &key (error-code +error-no-error+) debug-data)
-  "Close the HTTP/2 connection gracefully and invoke cleanup callbacks"
-  ;; Invoke cleanup callbacks for all streams before closing
-  (let ((mux (connection-multiplexer conn)))
-    (maphash
-     (lambda (stream-id stream)
-       (declare (ignore stream-id))
-       (let ((callback (stream-cleanup-callback stream)))
-         (when callback
-           (funcall callback stream))))
-     (multiplexer-streams mux)))
-  ;; Set closing state BEFORE broadcast so woken senders see it
-  (when (eql (connection-state conn) :open)
-    (setf (connection-state conn) :closing)
-    ;; Wake any senders blocked on flow control so they can exit
-    (bt2:condition-broadcast (connection-flow-control-cv conn))
-    (bt2:with-lock-held ((connection-write-lock conn))
-      (write-frame (make-goaway-frame (connection-last-stream-id conn)
-                                      error-code
-                                      debug-data)
-                   (connection-stream conn))
-      (force-output (connection-stream conn))))
-  (setf (connection-state conn) :closed)
-  (usocket:socket-close (connection-socket conn)))
+  "Close the HTTP/2 connection gracefully and invoke cleanup callbacks.
+The farewell GOAWAY is best effort: a peer that has stopped reading can leave
+another thread holding the write lock indefinitely, and a close that waits for
+it leaks the socket - along with, on a server, the connection slot behind it.
+Releasing the file descriptor is the part that must always happen."
+  (unwind-protect
+       (progn
+         ;; Invoke cleanup callbacks for all streams before closing
+         (let ((mux (connection-multiplexer conn)))
+           (maphash
+            (lambda (stream-id stream)
+              (declare (ignore stream-id))
+              (stream-run-cleanup stream))
+            (multiplexer-streams mux)))
+         ;; Set closing state BEFORE broadcast so woken senders see it
+         (when (eql (connection-state conn) :open)
+           (setf (connection-state conn) :closing)
+           ;; Wake any senders blocked on flow control so they can exit
+           (bt2:condition-broadcast (connection-flow-control-cv conn))
+           (ignore-errors
+            (bt2:with-lock-held ((connection-write-lock conn)
+                                 :timeout +goaway-lock-timeout+)
+              (write-frame (make-goaway-frame (connection-last-stream-id conn)
+                                              error-code
+                                              debug-data)
+                           (connection-stream conn))
+              (force-output (connection-stream conn))))))
+    (setf (connection-state conn) :closed)
+    (ignore-errors (usocket:socket-close (connection-socket conn)))))
 
 (defun connection-new-stream (conn)
   "Create a new stream on this connection"

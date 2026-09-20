@@ -80,6 +80,7 @@
    #:connection-send-data
    #:connection-send-rst-stream
    #:connection-read-frame
+   #:connection-socket
    #:connection-close
 
    ;; Conditions

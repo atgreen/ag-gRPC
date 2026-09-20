@@ -6,6 +6,14 @@
 ;;;; gRPC Server Class
 ;;;; ========================================================================
 
+(defconstant +default-connection-idle-timeout+ 300
+  "Default seconds of silence after which an idle connection is closed.")
+
+(defconstant +connection-slot-timeout+ 0.5
+  "How long the accept loop waits for a free connection slot before shedding
+the connection. Bounded on purpose: waiting here without a deadline stops the
+server accepting at all, which is a far worse failure than a rejected client.")
+
 (defclass grpc-server ()
   ((host :initarg :host :accessor server-host :initform "0.0.0.0"
          :documentation "Host address to bind to")
@@ -45,6 +53,13 @@
                     :accessor server-max-connections
                     :initform 128
                     :documentation "Maximum concurrent connection threads")
+   (connection-idle-timeout :initarg :connection-idle-timeout
+                            :accessor server-connection-idle-timeout
+                            :initform +default-connection-idle-timeout+
+                            :documentation "Seconds a connection may sit without sending a
+frame before it is closed. Connections with RPCs in flight are never idle.
+NIL disables reaping - and with it the only thing that returns a connection
+slot held by a peer that went away without closing its socket.")
    (connection-semaphore :initform nil :accessor server-connection-semaphore
                          :documentation "Semaphore limiting concurrent connections"))
   (:documentation "gRPC server"))
@@ -52,7 +67,8 @@
 (defun make-grpc-server (port &key (host "0.0.0.0") tls tls-certificate tls-key
                                    tls-ca-certificate (tls-verify-client nil)
                                    (max-concurrent-streams 100)
-                                   (max-connections 128))
+                                   (max-connections 128)
+                                   (connection-idle-timeout +default-connection-idle-timeout+))
   "Create a new gRPC server.
 PORT - Port to listen on
 HOST - Host address to bind to (default \"0.0.0.0\")
@@ -60,7 +76,9 @@ TLS - Enable TLS encryption
 TLS-CERTIFICATE - Path to TLS certificate file
 TLS-KEY - Path to TLS private key file
 TLS-CA-CERTIFICATE - Path to CA certificate for verifying client certificates (mTLS)
-TLS-VERIFY-CLIENT - When true, require and verify client certificates"
+TLS-VERIFY-CLIENT - When true, require and verify client certificates
+CONNECTION-IDLE-TIMEOUT - Seconds of silence before an idle connection is
+closed, or NIL to keep connections until the peer closes them"
   (when (and tls (not (and tls-certificate tls-key)))
     (error "TLS requires both :tls-certificate and :tls-key"))
   (make-instance 'grpc-server
@@ -72,7 +90,8 @@ TLS-VERIFY-CLIENT - When true, require and verify client certificates"
                  :tls-ca-certificate tls-ca-certificate
                  :tls-verify-client tls-verify-client
                  :max-concurrent-streams max-concurrent-streams
-                 :max-connections max-connections))
+                 :max-connections max-connections
+                 :connection-idle-timeout connection-idle-timeout))
 
 (defun server-add-interceptor (server interceptor)
   "Add an interceptor to the server's interceptor chain.
@@ -347,24 +366,71 @@ If GRACEFUL is true, wait for active connections to finish."
           do (handler-case
                  (let ((client-socket (usocket:socket-accept (server-socket server))))
                    (when client-socket
-                     (bt:wait-on-semaphore sem)
-                     (bt:make-thread
-                      (lambda ()
-                        (unwind-protect
-                             (handler-case
-                                 (server-handle-connection server client-socket)
-                               (error (e)
-                                 (format *error-output* "Connection error: ~A~%" e)
-                                 (ignore-errors (usocket:socket-close client-socket))))
-                          (bt:signal-semaphore sem)))
-                      :name "ag-grpc-conn")))
+                     (if (bt:wait-on-semaphore sem :timeout +connection-slot-timeout+)
+                         (bt:make-thread
+                          (lambda ()
+                            (unwind-protect
+                                 (handler-case
+                                     (server-handle-connection server client-socket)
+                                   (error (e)
+                                     (format *error-output* "Connection error: ~A~%" e)))
+                              (ignore-errors (usocket:socket-close client-socket))
+                              (bt:signal-semaphore sem)))
+                          :name "ag-grpc-conn")
+                         ;; At capacity. Shed this connection rather than block:
+                         ;; the wait above is the whole accept loop, so a peer
+                         ;; holding a slot would otherwise stop the server
+                         ;; serving anyone, permanently.
+                         (progn
+                           (format *error-output*
+                                   "Connection limit reached (~A); rejecting connection~%"
+                                   (server-max-connections server))
+                           (ignore-errors (usocket:socket-close client-socket))))))
                (usocket:socket-error (e)
                  ;; Socket closed during shutdown
                  (declare (ignore e))
                  (return))))))
 
+(defun server-wait-for-frame (server socket conn)
+  "Wait for SOCKET to become readable, returning NIL once the peer has been
+silent past the server's idle timeout.
+
+CONN is the connection, or NIL before the handshake has built one. A
+connection with streams in flight is never treated as idle - the client is
+entitled to stay quiet while the server is the one talking.
+
+WAIT-FOR-INPUT also returns NIL when the wait is interrupted (EINTR), which
+says nothing about the peer, so idleness is decided by the clock rather than
+by a single NIL."
+  (let ((idle (server-connection-idle-timeout server)))
+    (if (null idle)
+        t
+        (let ((deadline (+ (get-internal-real-time)
+                           (* idle internal-time-units-per-second))))
+          (loop
+            ;; Bytes already buffered above the socket (TLS records, stream
+            ;; buffer) will not show up in a select, so check the stream first.
+            (when (and conn (listen (ag-http2:connection-stream conn)))
+              (return t))
+            (let ((remaining (/ (- deadline (get-internal-real-time))
+                                internal-time-units-per-second)))
+              (cond ((usocket:wait-for-input socket :timeout (max remaining 0)
+                                                    :ready-only t)
+                     (return t))
+                    ((plusp remaining))         ; woken early - keep waiting
+                    ((and conn (plusp (ag-http2:connection-active-streams conn)))
+                     ;; Work in flight: the peer owes us nothing yet.
+                     (setf deadline (+ (get-internal-real-time)
+                                       (* idle internal-time-units-per-second))))
+                    (t (return nil)))))))))
+
 (defun server-handle-connection (server client-socket)
   "Handle a single client connection"
+  ;; Don't start the (possibly TLS) handshake until the peer actually speaks.
+  ;; The handshake read has no deadline of its own, so a peer that connects and
+  ;; says nothing would own this thread - and its connection slot - for good.
+  (unless (server-wait-for-frame server client-socket nil)
+    (return-from server-handle-connection))
   (let* ((conn (ag-http2:make-server-connection client-socket
                                                  :tls (server-tls server)
                                                  :certificate (server-tls-certificate server)
@@ -395,9 +461,12 @@ If GRACEFUL is true, wait for active connections to finish."
   "Process frames for a connection until closed"
   (loop while (eql (ag-http2:connection-state conn) :open)
         do (handler-case
-               (let ((frame (ag-http2:connection-read-frame conn)))
-                 (when frame
-                   (server-process-frame server conn frame peer-addr)))
+               (progn
+                 (unless (server-wait-for-frame server (ag-http2:connection-socket conn) conn)
+                   (return))
+                 (let ((frame (ag-http2:connection-read-frame conn)))
+                   (when frame
+                     (server-process-frame server conn frame peer-addr))))
              (ag-http2:http2-connection-error (e)
                (declare (ignore e))
                (return))

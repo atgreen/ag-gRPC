@@ -36,7 +36,12 @@
    (rst-stream-error :initform nil :accessor stream-rst-stream-error
                      :documentation "RST_STREAM error code if received")
    (cleanup-callback :initform nil :accessor stream-cleanup-callback
-                     :documentation "Optional callback invoked when stream closes"))
+                     :documentation "Optional callback invoked when stream closes")
+   (cleanup-lock :initform (bt2:make-lock :name "http2-stream-cleanup")
+                 :reader stream-cleanup-lock
+                 :documentation "Guards claiming the cleanup callback, so a stream
+closed from two directions at once (peer RST while the handler sends its last
+frame) still runs cleanup exactly once"))
   (:documentation "Represents an HTTP/2 stream"))
 
 (defun make-http2-stream (id &key (initial-window-size 65535))
@@ -50,9 +55,22 @@
 ;;;; Stream State Transitions
 ;;;; ========================================================================
 
+(defun stream-run-cleanup (stream)
+  "Invoke STREAM's cleanup callback, at most once over the stream's life.
+The callback is claimed under the lock and run outside it, so a callback that
+blocks cannot hold up the peer's half of the close."
+  (let ((callback (bt2:with-lock-held ((stream-cleanup-lock stream))
+                    (shiftf (stream-cleanup-callback stream) nil))))
+    (when callback
+      (funcall callback stream))))
+
 (defun stream-transition (stream event)
   "Transition a stream to a new state based on an event.
-Returns the new state or signals an error for invalid transitions."
+Returns the new state or signals an error for invalid transitions.
+Reaching :closed runs the stream's cleanup callback: a stream that ends the
+ordinary way - the handler sending END_STREAM - has to release what an
+RST_STREAM would, or the resources it holds are held for the life of the
+connection."
   (let ((current (stream-state stream)))
     (setf (stream-state stream)
           (ecase current
@@ -96,7 +114,11 @@ Returns the new state or signals an error for invalid transitions."
                (:recv-rst-stream :closed)))
             (:closed
              ;; Already closed, ignore
-             :closed)))))
+             :closed)))
+    (when (and (eql (stream-state stream) :closed)
+               (not (eql current :closed)))
+      (stream-run-cleanup stream))
+    (stream-state stream)))
 
 (defun stream-can-send-p (stream)
   "Return T if the stream can send data"
@@ -157,9 +179,7 @@ Client streams use odd IDs, server streams use even IDs."
   (let ((stream (gethash stream-id (multiplexer-streams mux))))
     (when stream
       ;; Invoke cleanup callback before closing
-      (let ((callback (stream-cleanup-callback stream)))
-        (when callback
-          (funcall callback stream)))
+      (stream-run-cleanup stream)
       (setf (stream-state stream) :closed))))
 
 (defun multiplexer-active-streams (mux)
