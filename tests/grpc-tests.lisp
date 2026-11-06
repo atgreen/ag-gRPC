@@ -28,3 +28,37 @@
          (payload (make-array n :element-type '(unsigned-byte 8))))
     (dotimes (i n) (setf (aref payload i) (ldb (byte 8 0) (* i 2654435761))))
     (is (equalp payload (ag-grpc::gzip-decompress (ag-grpc::gzip-compress payload))))))
+
+(defun %empty-octets ()
+  (make-array 0 :element-type '(unsigned-byte 8)))
+
+(test gzip-compress-empty-message-decompresses-to-empty
+  "Issue #21. salza2 compresses empty input into a gzip member whose ISIZE is
+   0x8000, so (gzip-decompress (gzip-compress #())) used to yield 32 KB of
+   zeros. An empty protobuf message (e.g. a defaulted heartbeat) is common, so
+   an empty message must round-trip to nothing."
+  (let ((compressed (ag-grpc::gzip-compress (%empty-octets))))
+    (is (= 20 (length compressed)))
+    (is (zerop (length (ag-grpc::gzip-decompress compressed))))))
+
+(test deflate-compress-empty-message-decompresses-to-empty
+  "Issue #21. The deflate path must likewise emit a valid empty stream, not a
+   32 KB-expanding one."
+  (multiple-value-bind (compressed compressed-p)
+      (ag-grpc::compress-grpc-message (%empty-octets) "deflate")
+    (is-true compressed-p)
+    (is (zerop (length (ag-grpc::decompress-grpc-message compressed "deflate"))))))
+
+(test compress-grpc-message-round-trips-non-empty-gzip-and-deflate
+  "Issue #21. The block-copy output collection must still produce byte-for-byte
+   correct gzip and deflate streams for ordinary payloads."
+  (let ((payload (map '(simple-array (unsigned-byte 8) (*))
+                      #'char-code
+                      "the quick brown fox jumps over the lazy dog, repeatedly.")))
+    (dolist (encoding '("gzip" "deflate"))
+      (multiple-value-bind (compressed compressed-p)
+          (ag-grpc::compress-grpc-message payload encoding)
+        (is-true compressed-p)
+        (is (equalp payload
+                    (ag-grpc::decompress-grpc-message compressed encoding))
+            "~A round-trip failed" encoding)))))
