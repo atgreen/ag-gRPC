@@ -53,3 +53,23 @@
        conn (list (cons ag-http2::+settings-header-table-size+ 8192))))
     (is (eql 8192 (cdr (assoc ag-http2::+settings-header-table-size+
                               (ag-http2::connection-remote-settings conn)))))))
+
+(test flow-control-lock-accepts-the-bt2-ops-the-send-path-uses
+  "Regression for the BT2 lock type mismatch (issue #17). CONNECTION-SEND-DATA
+   drives the flow-control lock with bt2:condition-wait and, on the zero-window
+   fallback, bt2:release-lock / bt2:acquire-lock. If that lock ever reverts to a
+   v1 (bt:make-lock) raw sb-thread:mutex, those bt2 ops signal \"BT2:LOCK is not
+   of type SB-THREAD:MUTEX\" the instant HTTP/2 flow control engages during a
+   large transfer. Assert the connection's real lock and CV accept every bt2 op
+   the send path performs on them."
+  (let* ((conn (make-instance 'ag-http2::http2-connection))
+         (lock (ag-http2::connection-flow-control-lock conn))
+         (cv (ag-http2::connection-flow-control-cv conn)))
+    ;; The zero-window, no-reader-thread fallback: release then reacquire.
+    (finishes
+      (bt2:acquire-lock lock)
+      (bt2:release-lock lock))
+    ;; The zero-window wait. A short timeout returns without a type error.
+    (finishes
+      (bt2:with-lock-held (lock)
+        (bt2:condition-wait cv lock :timeout 0.05)))))
