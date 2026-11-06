@@ -158,51 +158,70 @@ Returns a list of message data byte vectors."
 Prevents gzip bomb attacks where a small compressed payload expands to
 exhaust memory.  Set to NIL to disable the check.  Default: 16 MB.")
 
+(defparameter *inflate-initial-ratio* 8
+  "Start a decompression output buffer at this multiple of the compressed size.")
+
+(defparameter *inflate-minimum-buffer* 4096
+  "Smallest decompression output buffer, for a tiny compressed message.")
+
 (defun bounded-inflate (data format)
-  "Decompress DATA (FORMAT is 'chipz:gzip or 'chipz:deflate) with peak output
-allocation bounded by *MAX-DECOMPRESSED-SIZE*.
+  "Decompress DATA (FORMAT is 'chipz:gzip or 'chipz:deflate), holding output
+allocation proportional to the real message, bounded by *MAX-DECOMPRESSED-SIZE*.
 
 A decompression bomb (a small payload that expands ~1000:1) can no longer force
-a multi-gigabyte transient allocation.  Instead of decompressing fully and
-checking the length afterwards -- which must first materialize the entire
-output in memory -- this drives chipz incrementally into a fixed CAP+1 buffer
-and rejects the stream the instant its output would exceed the cap, so no more
-than CAP+1 bytes are ever committed.  Signals GRPC-ERROR when the limit is
+a multi-gigabyte transient allocation: output is produced incrementally and the
+stream is rejected the instant its output would exceed the cap.  But neither
+does an ordinary small message pay for the whole cap -- the previous version
+allocated a fixed CAP+1 (16 MB default) buffer for every message, however tiny,
+which on a busy stream churned gigabytes of garbage a minute.  The buffer now
+starts near the expected output size (*INFLATE-INITIAL-RATIO* x the compressed
+length, floored at *INFLATE-MINIMUM-BUFFER*) and doubles as chipz fills it,
+clamped to CAP+1, so peak allocation is bounded by ~2x the cap for a bomb and by
+the real size for an ordinary message.  Signals GRPC-ERROR when the limit is
 exceeded (or the stream is truncated/corrupt).  When *MAX-DECOMPRESSED-SIZE*
-is NIL the bound is disabled (unbounded, single-shot decompress).  CL-SEC-2026-0212."
-  (let* ((simple-data (if (typep data '(simple-array (unsigned-byte 8) (*)))
-                          data
-                          (let ((simple (make-array (length data)
-                                                    :element-type '(unsigned-byte 8))))
-                            (replace simple data)
-                            simple)))
-         (cap *max-decompressed-size*))
-    (if (null cap)
-        ;; Bound disabled: preserve the original single-shot behavior.
-        (let ((result (chipz:decompress nil format simple-data)))
-          (if (typep result '(simple-array (unsigned-byte 8) (*)))
-              result
-              (coerce result '(simple-array (unsigned-byte 8) (*)))))
-        ;; CAP+1 output buffer: chipz stops at output-full without erroring,
-        ;; returning (values consumed produced).  PRODUCED = CAP+1 means the
-        ;; decompressed data is at least CAP+1 bytes -> reject (bomb) having
-        ;; allocated only CAP+1 bytes.  If it stopped short of the cap but the
-        ;; stream never finished, FINISH-DSTATE signals (truncated/corrupt).
-        (let ((out (make-array (1+ cap) :element-type '(unsigned-byte 8)))
-              (state (chipz:make-dstate format)))
-          (multiple-value-bind (consumed produced)
-              (chipz:decompress out state simple-data)
-            (declare (ignore consumed))
-            (when (> produced cap)
-              (error 'grpc-error
-                     :message (format nil "Decompressed size exceeds limit ~D bytes (gzip bomb defense)"
-                                      cap)))
-            (handler-case (chipz:finish-dstate state)
-              (chipz:chipz-error ()
-                (error 'grpc-error
-                       :message (format nil "Decompressed stream is truncated or exceeds limit ~D bytes (gzip bomb defense)"
-                                        cap))))
-            (subseq out 0 produced))))))
+is NIL the bound is disabled.  CL-SEC-2026-0212."
+  (let* ((input (if (typep data '(simple-array (unsigned-byte 8) (*)))
+                    data
+                    (let ((simple (make-array (length data)
+                                              :element-type '(unsigned-byte 8))))
+                      (replace simple data)
+                      simple)))
+         (cap *max-decompressed-size*)
+         (state (chipz:make-dstate format))
+         (size (max *inflate-minimum-buffer*
+                    (* *inflate-initial-ratio* (length input))))
+         (output (make-array (if cap (min size (1+ cap)) size)
+                             :element-type '(unsigned-byte 8)))
+         (input-start 0)
+         (produced 0))
+    (loop
+      (multiple-value-bind (consumed written)
+          (chipz:decompress output state input
+                            :input-start input-start :output-start produced)
+        (incf input-start consumed)
+        (incf produced written)
+        ;; Over the cap having allocated at most CAP+1 -> reject (bomb).
+        (when (and cap (> produced cap))
+          (error 'grpc-error
+                 :message (format nil "Decompressed size exceeds limit ~D bytes (gzip bomb defense)"
+                                  cap)))
+        ;; Stream complete -> done.  FINISH-DSTATE signals premature-end while
+        ;; the stream is unfinished; that just means the buffer filled first.
+        (when (handler-case (chipz:finish-dstate state)
+                (chipz:premature-end-of-stream () nil))
+          (return (subseq output 0 produced)))
+        ;; Stopped with room left but the stream is not done -> the input ran
+        ;; out mid-stream, so it is truncated or corrupt.
+        (when (< produced (length output))
+          (error 'grpc-error
+                 :message "Decompressed stream is truncated or corrupt"))
+        ;; Buffer full and more to come: grow (double, clamped to CAP+1).
+        (let ((grown (make-array (if cap
+                                     (min (* 2 (length output)) (1+ cap))
+                                     (* 2 (length output)))
+                                 :element-type '(unsigned-byte 8))))
+          (replace grown output)
+          (setf output grown))))))
 
 (defun gzip-decompress (data)
   "Decompress gzip DATA. Returns decompressed byte vector.
