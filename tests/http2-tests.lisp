@@ -73,3 +73,35 @@
     (finishes
       (bt2:with-lock-held (lock)
         (bt2:condition-wait cv lock :timeout 0.05)))))
+
+(test discard-unsent-output-drops-buffered-bytes-so-close-cannot-resend-them
+  "Regression for the interrupted-write resend (issue #22). A thread unwound by
+   sb-thread:interrupt-thread between write(2) and SBCL's buffer reset leaves
+   already-sent frame bytes in the fd-stream's output buffer; CONNECTION-CLOSE's
+   GOAWAY FORCE-OUTPUT would then send them again (a repeated DATA+END_STREAM
+   crashed grpc-go servers). CONNECTION-CLOSE now calls DISCARD-UNSENT-OUTPUT
+   before writing GOAWAY. Stage a frame in a real fd-stream's buffer and show
+   that discarding it keeps it off the wire, where a plain flush would send it."
+  (uiop:with-temporary-file (:pathname path)
+    (let ((staged (coerce #(0 0 0 0 1 0 0 0 1) ; DATA, END_STREAM, stream 1
+                          '(simple-array (unsigned-byte 8) (*)))))
+      (flet ((flushed-length ()
+               (with-open-file (in path :element-type '(unsigned-byte 8))
+                 (file-length in))))
+        ;; Control: without the discard, a flush sends the staged frame.
+        (with-open-file (out path :direction :output
+                                  :element-type '(unsigned-byte 8)
+                                  :if-exists :supersede)
+          (write-sequence staged out)
+          (force-output out))
+        (is (= (length staged) (flushed-length)))
+        ;; With the discard, the staged bytes never reach the wire.
+        (with-open-file (out path :direction :output
+                                  :element-type '(unsigned-byte 8)
+                                  :if-exists :supersede)
+          (let ((conn (make-instance 'ag-http2::http2-connection
+                                     :stream out :socket nil :client-p t)))
+            (write-sequence staged out)
+            (ag-http2::discard-unsent-output conn)
+            (force-output out)))
+        (is (zerop (flushed-length)))))))

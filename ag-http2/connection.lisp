@@ -517,6 +517,29 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
 ;;;; Connection Lifecycle
 ;;;; ========================================================================
 
+(defun discard-unsent-output (conn)
+  "Drop any bytes left in CONN's output buffer by a writer that was unwound.
+Every frame write is immediately followed by FORCE-OUTPUT, so nothing
+legitimate is ever pending when we close - under normal operation the buffer is
+empty. But SBCL resets an fd-stream's output buffer only after write(2)
+returns: an interrupt (sb-thread:interrupt-thread, as kubelet-like cancellation
+uses) that unwinds a writer in that window leaves frame bytes the peer already
+received in the buffer, and the GOAWAY FORCE-OUTPUT below would send them a
+second time. A repeated DATA frame with END_STREAM crashed grpc-go servers
+< v1.85.0 (grpc/grpc-go#9533). CLEAR-OUTPUT is a no-op on SBCL fd-streams, so
+reset the buffer itself; discard before writing GOAWAY so the GOAWAY still goes
+out cleanly."
+  (let ((stream (connection-stream conn)))
+    #+sbcl
+    (when (typep stream 'sb-sys:fd-stream)
+      (let ((buffer (sb-impl::fd-stream-obuf stream)))
+        (when buffer
+          (setf (sb-impl::buffer-head buffer) 0
+                (sb-impl::buffer-tail buffer) 0)))
+      (setf (sb-impl::fd-stream-output-queue stream) nil))
+    #-sbcl
+    (ignore-errors (clear-output stream))))
+
 (defun connection-close (conn &key (error-code +error-no-error+) debug-data)
   "Close the HTTP/2 connection gracefully and invoke cleanup callbacks.
 The farewell GOAWAY is best effort: a peer that has stopped reading can leave
@@ -540,6 +563,9 @@ Releasing the file descriptor is the part that must always happen."
            (ignore-errors
             (bt2:with-lock-held ((connection-write-lock conn)
                                  :timeout +goaway-lock-timeout+)
+              ;; Drop any frame bytes a thread unwound mid-write left behind, so
+              ;; the GOAWAY flush does not resend an already-delivered frame.
+              (discard-unsent-output conn)
               (write-frame (make-goaway-frame (connection-last-stream-id conn)
                                               error-code
                                               debug-data)
