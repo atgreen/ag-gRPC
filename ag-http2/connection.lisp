@@ -572,6 +572,10 @@ Releasing the file descriptor is the part that must always happen."
                            (connection-stream conn))
               (force-output (connection-stream conn))))))
     (setf (connection-state conn) :closed)
+    ;; Closing a descriptor in another thread may leave a reader blocked.
+    ;; Shut down both directions first so streaming RPCs can exit promptly.
+    (ignore-errors
+      (usocket:socket-shutdown (connection-socket conn) :io))
     (ignore-errors (usocket:socket-close (connection-socket conn)))))
 
 (defun connection-new-stream (conn)

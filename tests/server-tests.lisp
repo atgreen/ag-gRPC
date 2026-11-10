@@ -247,3 +247,41 @@ job, so their connections can carry no frames for minutes at a time."
                           "the open stream should still be counted in flight")))
                (ignore-errors (ag-grpc:channel-close channel))))
         (stop-test-server server thread)))))
+
+(test bidi-client-cancellation-wakes-server-receiver
+  "RST_STREAM must wake a bidi handler blocked in STREAM-RECV.
+
+Without closing the per-stream message buffer, the handler thread remains
+parked forever after client cancellation and every reconnect leaks another
+thread."
+  (multiple-value-bind (server thread port)
+      (start-test-server)
+    (let ((started (bt:make-semaphore :count 0))
+          (completed (bt:make-semaphore :count 0)))
+      (ag-grpc:server-register-handler
+       server "/test.Agent/Connect"
+       (lambda (ctx stream)
+         (declare (ignore ctx))
+         (bt:signal-semaphore started)
+         (unwind-protect
+              (ag-grpc:stream-recv stream)
+           (bt:signal-semaphore completed)))
+       :request-type 'ag-grpc:health-check-request
+       :response-type 'ag-grpc:health-check-response
+       :client-streaming t
+       :server-streaming t)
+      (unwind-protect
+           (let ((channel (ag-grpc:make-channel "127.0.0.1" port :timeout 5)))
+             (unwind-protect
+                  (let ((stream
+                          (ag-grpc:call-bidirectional-streaming
+                           channel "/test.Agent/Connect"
+                           :response-type 'ag-grpc:health-check-response)))
+                    (is-true (bt:wait-on-semaphore started :timeout 2)
+                             "test setup: server handler should start")
+                    (ag-grpc:channel-cancel-stream
+                     channel (ag-grpc::bidi-stream-id stream))
+                    (is-true (bt:wait-on-semaphore completed :timeout 2)
+                             "client cancellation must wake stream-recv"))
+               (ignore-errors (ag-grpc:channel-close channel))))
+        (stop-test-server server thread)))))
