@@ -347,6 +347,24 @@ Use server-stop from another thread to shut down."
 If GRACEFUL is true, wait for active connections to finish."
   (declare (ignore graceful))  ; TODO: Implement graceful shutdown
   (setf (server-state server) :shutting-down)
+  ;; Closing a listening socket from another thread does not wake a thread
+  ;; already blocked in ACCEPT on every usocket backend.  A disposable local
+  ;; connection makes ACCEPT return; the state check in SERVER-ACCEPT-LOOP
+  ;; closes it without starting a connection worker.
+  (when (server-socket server)
+    (let ((wake-socket nil))
+      (unwind-protect
+           (ignore-errors
+             (setf wake-socket
+                   (usocket:socket-connect
+                    (cond
+                      ((string= (server-host server) "0.0.0.0") "127.0.0.1")
+                      ((string= (server-host server) "::") "::1")
+                      (t (server-host server)))
+                    (usocket:get-local-port (server-socket server))
+                    :element-type '(unsigned-byte 8))))
+        (when wake-socket
+          (ignore-errors (usocket:socket-close wake-socket))))))
   ;; Close listening socket to break accept loop
   (when (server-socket server)
     (usocket:socket-close (server-socket server))
@@ -366,7 +384,9 @@ If GRACEFUL is true, wait for active connections to finish."
           do (handler-case
                  (let ((client-socket (usocket:socket-accept (server-socket server))))
                    (when client-socket
-                     (if (bt:wait-on-semaphore sem :timeout +connection-slot-timeout+)
+                     (if (not (eql (server-state server) :running))
+                         (ignore-errors (usocket:socket-close client-socket))
+                         (if (bt:wait-on-semaphore sem :timeout +connection-slot-timeout+)
                          (bt:make-thread
                           (lambda ()
                             (unwind-protect
@@ -385,7 +405,7 @@ If GRACEFUL is true, wait for active connections to finish."
                            (format *error-output*
                                    "Connection limit reached (~A); rejecting connection~%"
                                    (server-max-connections server))
-                           (ignore-errors (usocket:socket-close client-socket))))))
+                           (ignore-errors (usocket:socket-close client-socket)))))))
                (usocket:socket-error (e)
                  ;; Socket closed during shutdown
                  (declare (ignore e))
@@ -552,9 +572,20 @@ by a single NIL."
                   (setf (context-cancel-fn ctx) nil)))
               ;; Remove stream state from connection maps
               (connection-remove-stream-state conn h2-stream)
-              ;; Remove message buffer if exists
-              (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
-                (remhash stream-id (ag-http2:connection-stream-buffers conn)))
+              ;; Wake a streaming handler blocked in STREAM-RECV before
+              ;; dropping the connection's reference to its message buffer.
+              ;; RST_STREAM and connection teardown both arrive here, and a
+              ;; bare REMHASH would otherwise strand the handler forever.
+              (let ((buffer
+                      (bt:with-lock-held
+                          ((ag-http2:connection-stream-state-lock conn))
+                        (prog1
+                            (gethash stream-id
+                                     (ag-http2:connection-stream-buffers conn))
+                          (remhash stream-id
+                                   (ag-http2:connection-stream-buffers conn))))))
+                (when buffer
+                  (buffer-close buffer)))
               ;; Decrement active streams counter
               (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
                 (decf (ag-http2:connection-active-streams conn)))))
