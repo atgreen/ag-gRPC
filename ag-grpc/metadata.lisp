@@ -386,9 +386,9 @@ Validates the value is within spec limits (1-8 digits) and caps at
     (let* ((value (handler-case (parse-integer digits)
                     (error () (return-from parse-grpc-timeout 0))))
            (seconds (case unit
-                      (#\n (* value 1e-9))   ; nanoseconds
-                      (#\u (* value 1e-6))   ; microseconds
-                      (#\m (* value 1e-3))   ; milliseconds
+                      (#\n (/ value 1000000000))   ; nanoseconds
+                      (#\u (/ value 1000000))   ; microseconds
+                      (#\m (/ value 1000))   ; milliseconds
                       (#\S value)            ; seconds
                       (#\M (* value 60))     ; minutes
                       (#\H (* value 3600))   ; hours

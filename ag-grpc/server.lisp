@@ -255,8 +255,8 @@ SERVER-STREAMING - T if server sends multiple messages"
   2. RST_STREAM second (client-initiated cancellation)
   This ensures deadline errors are reported even if RST_STREAM also present."
 
-  ;; First check deadline (highest precedence)
   (let ((cl-ctx (context-cancel-context ctx)))
+    ;; First check deadline (highest precedence)
     (when (cl-cancel:done-p cl-ctx)
       (let ((err (cl-cancel:err cl-ctx)))
         (when (typep err 'cl-cancel:deadline-exceeded)
@@ -265,30 +265,30 @@ SERVER-STREAMING - T if server sends multiple messages"
                  :message (format nil "~A" err)
                  :headers (context-request-headers ctx)
                  :trailers nil
-                 :cause err)))))
+                 :cause err))))
 
-  ;; Then check RST_STREAM (second precedence)
-  (let* ((stream-id (context-stream-id ctx))
-         (h2-stream (ag-http2:multiplexer-get-stream
-                     (ag-http2:connection-multiplexer (context-connection ctx))
-                     stream-id)))
-    (when (and h2-stream (ag-http2:stream-rst-stream-error h2-stream))
-      (error 'grpc-status-error
-             :code +grpc-status-cancelled+
-             :message "Cancelled by client (RST_STREAM)"
-             :headers (context-request-headers ctx)
-             :trailers nil)))
+    ;; Then check RST_STREAM (second precedence)
+    (let* ((stream-id (context-stream-id ctx))
+           (h2-stream (ag-http2:multiplexer-get-stream
+                       (ag-http2:connection-multiplexer (context-connection ctx))
+                       stream-id)))
+      (when (and h2-stream (ag-http2:stream-rst-stream-error h2-stream))
+        (error 'grpc-status-error
+               :code +grpc-status-cancelled+
+               :message "Cancelled by client (RST_STREAM)"
+               :headers (context-request-headers ctx)
+               :trailers nil)))
 
-  ;; Finally check other cl-cancel cancellation
-  (handler-case
-      (cl-cancel:check-cancellation cl-ctx)
-    (cl-cancel:cancelled (e)
-      (error 'grpc-status-error
-             :code +grpc-status-cancelled+
-             :message (format nil "~A" e)
-             :headers (context-request-headers ctx)
-             :trailers nil
-             :cause e))))
+    ;; Finally check other cl-cancel cancellation
+    (handler-case
+        (cl-cancel:check-cancellation cl-ctx)
+      (cl-cancel:cancelled (e)
+        (error 'grpc-status-error
+               :code +grpc-status-cancelled+
+               :message (format nil "~A" e)
+               :headers (context-request-headers ctx)
+               :trailers nil
+               :cause e)))))
 
 ;;;; ========================================================================
 ;;;; Server Call Stream (for streaming RPCs)
@@ -519,6 +519,14 @@ by a single NIL."
          (headers (ag-http2:stream-headers h2-stream))
          (method-path (rest (assoc :path headers)))
          (handler (server-get-handler server method-path)))
+    (when (eq :closed (ag-http2:stream-state h2-stream))
+      (return-from server-handle-headers))
+    ;; Even rejected calls need transport retirement. The full handler cleanup
+    ;; replaces this callback once application state has been registered.
+    (setf (ag-http2:stream-cleanup-callback h2-stream)
+          (lambda (stream)
+            (ag-http2::multiplexer-forget-stream
+             (ag-http2:connection-multiplexer conn) (ag-http2:stream-id stream))))
     (unless handler
       ;; No handler registered - send UNIMPLEMENTED
       (server-send-error conn stream-id +grpc-status-unimplemented+
@@ -588,7 +596,8 @@ by a single NIL."
                   (buffer-close buffer)))
               ;; Decrement active streams counter
               (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
-                (decf (ag-http2:connection-active-streams conn)))))
+                (decf (ag-http2:connection-active-streams conn)))
+              (ag-http2::multiplexer-forget-stream (ag-http2:connection-multiplexer conn) stream-id)))
       ;; For streaming RPCs, create message buffer and spawn handler thread.
       ;; For unary RPCs, wait for END_STREAM.
       (let ((is-streaming (or (handler-client-streaming-p handler)
@@ -638,15 +647,22 @@ by a single NIL."
                         (message (ag-proto:deserialize-from-bytes
                                   request-type msg-data)))
                    (buffer-push-message msg-buffer message))
-                 (let ((remaining (subseq byte-buffer consumed)))
-                   (setf (fill-pointer byte-buffer) 0)
-                   (loop for byte across remaining
-                         do (vector-push-extend byte byte-buffer))))))
+                 (let* ((remaining (subseq byte-buffer consumed))
+                        (length (length remaining)))
+                   ;; Keep only the incomplete next message, releasing the
+                   ;; capacity of already decoded streaming requests.
+                   (setf byte-buffer
+                         (make-array length :element-type '(unsigned-byte 8)
+                                            :initial-contents remaining
+                                            :adjustable t :fill-pointer length)
+                         (ag-http2:stream-data-buffer h2-stream) byte-buffer)))))
            (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
              (buffer-close msg-buffer)))
           (t
            (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
-             (let ((buffer (ag-http2:stream-data-buffer h2-stream)))
+             ;; Transfer the complete unary body out of the retained stream.
+             ;; Closed HTTP/2 records must not pin every historical request.
+             (let ((buffer (ag-http2:stream-consume-data h2-stream)))
                (server-dispatch-handler
                 server conn ctx handler buffer)))))))
 

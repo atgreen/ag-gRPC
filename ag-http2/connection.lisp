@@ -476,8 +476,9 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
     (data-frame
      (let* ((stream-id (frame-stream-id frame))
             (stream (multiplexer-get-stream (connection-multiplexer conn) stream-id))
-            (data-length (length (frame-payload frame))))
-       (stream-append-data stream (frame-payload frame))
+            (data-length (length (frame-payload frame)))
+            (closed-p (eq :closed (stream-state stream))))
+       (unless closed-p (stream-append-data stream (frame-payload frame)))
        ;; Bound the buffered-but-unconsumed request data. Without this a peer
        ;; can stream DATA forever (no END_STREAM) and exhaust memory, since the
        ;; window is replenished below as data is accepted.
@@ -492,15 +493,16 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
        (when (plusp data-length)
          ;; Consume from local windows
          (decf (window-size (connection-local-window conn)) data-length)
-         (decf (stream-local-window stream) data-length)
+         (unless closed-p (decf (stream-local-window stream) data-length))
          ;; Send WINDOW_UPDATE to replenish connection and stream windows
          (bt2:with-lock-held ((connection-write-lock conn))
            (write-frame (make-window-update-frame 0 data-length) (connection-stream conn))
-           (write-frame (make-window-update-frame stream-id data-length) (connection-stream conn))
+           (unless closed-p
+             (write-frame (make-window-update-frame stream-id data-length) (connection-stream conn)))
            (force-output (connection-stream conn)))
          ;; Restore local windows
          (incf (window-size (connection-local-window conn)) data-length)
-         (incf (stream-local-window stream) data-length))
+         (unless closed-p (incf (stream-local-window stream) data-length)))
        (when (plusp (logand (frame-flags frame) +flag-end-stream+))
          (stream-transition stream :recv-end-stream))))
     (rst-stream-frame
@@ -549,12 +551,12 @@ Releasing the file descriptor is the part that must always happen."
   (unwind-protect
        (progn
          ;; Invoke cleanup callbacks for all streams before closing
-         (let ((mux (connection-multiplexer conn)))
-           (maphash
-            (lambda (stream-id stream)
-              (declare (ignore stream-id))
-              (stream-run-cleanup stream))
-            (multiplexer-streams mux)))
+         (let* ((mux (connection-multiplexer conn))
+                (streams (bt2:with-lock-held ((multiplexer-lock mux))
+                           (loop for stream being the hash-values of (multiplexer-streams mux) collect stream))))
+           (dolist (stream streams)
+             (setf (stream-state stream) :closed)
+             (stream-run-cleanup stream)))
          ;; Set closing state BEFORE broadcast so woken senders see it
          (when (eql (connection-state conn) :open)
            (setf (connection-state conn) :closing)
