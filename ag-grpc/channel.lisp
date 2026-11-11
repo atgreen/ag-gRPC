@@ -276,9 +276,27 @@ For unary calls, this indicates multiple messages were sent which is an error."
     (plusp (length (ag-http2:stream-data-buffer stream)))))
 
 (defun channel-cancel-stream (channel stream-id)
-  "Cancel an in-progress RPC call by sending RST_STREAM with CANCEL error code.
-This immediately terminates the stream without waiting for a response."
-  (ag-http2:connection-send-rst-stream
-   (channel-connection channel)
-   stream-id
-   ag-http2:+error-cancel+))
+  "Cancel an RPC and release its transport state, including unread responses.
+Local cleanup runs even if sending RST_STREAM fails. Repeated cancellation is safe."
+  (let* ((conn (channel-connection channel))
+         (mux (and conn (ag-http2:connection-multiplexer conn)))
+         (stream (and mux
+                      (bt2:with-lock-held ((ag-http2::multiplexer-lock mux))
+                        (gethash stream-id (ag-http2::multiplexer-streams mux))))))
+    (when stream
+      (unwind-protect
+           (unless (eq :closed (ag-http2:stream-state stream))
+             (ag-http2:connection-send-rst-stream conn stream-id ag-http2:+error-cancel+))
+        (unwind-protect (ag-http2:multiplexer-close-stream mux stream-id)
+          (ag-http2::multiplexer-forget-stream mux stream-id))))))
+
+(defun channel-retire-stream (channel stream-id)
+  "Release a completed call's transport state; cancel an unfinished call first."
+  (let ((conn (channel-connection channel)))
+    (when conn
+      (let* ((mux (ag-http2:connection-multiplexer conn))
+             (stream (ag-http2:multiplexer-get-stream mux stream-id)))
+        (unless (eq :closed (ag-http2:stream-state stream))
+          (ignore-errors (channel-cancel-stream channel stream-id))
+          (ag-http2:multiplexer-close-stream mux stream-id))
+        (ag-http2::multiplexer-forget-stream mux stream-id)))))

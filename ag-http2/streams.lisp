@@ -140,7 +140,10 @@ connection."
 (defun stream-consume-data (stream)
   "Consume and return all buffered data"
   (let ((data (copy-seq (stream-data-buffer stream))))
-    (setf (fill-pointer (stream-data-buffer stream)) 0)
+    ;; Closed stream records remain in the multiplexer. A zero fill pointer
+    ;; still retains the entire request allocation on a long-lived connection.
+    (setf (stream-data-buffer stream)
+          (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
     data))
 
 ;;;; ========================================================================
@@ -148,7 +151,10 @@ connection."
 ;;;; ========================================================================
 
 (defclass stream-multiplexer ()
-  ((streams :initform (make-hash-table) :accessor multiplexer-streams
+  ((lock :initform (bt2:make-lock :name "http2-multiplexer") :reader multiplexer-lock)
+   (odd-high-water :initform -1 :accessor multiplexer-odd-high-water)
+   (even-high-water :initform 0 :accessor multiplexer-even-high-water)
+   (streams :initform (make-hash-table) :accessor multiplexer-streams
             :documentation "Map of stream-id to http2-stream")
    (next-stream-id :initarg :next-stream-id :accessor multiplexer-next-stream-id
                    :documentation "Next available stream ID")
@@ -162,27 +168,51 @@ Client streams use odd IDs, server streams use even IDs."
   (make-instance 'stream-multiplexer
                  :next-stream-id (if client-p 1 2)))
 
+(defun multiplexer-note-id (mux id)
+  (if (oddp id)
+      (setf (multiplexer-odd-high-water mux) (max id (multiplexer-odd-high-water mux)))
+      (setf (multiplexer-even-high-water mux) (max id (multiplexer-even-high-water mux)))))
+
 (defun multiplexer-get-stream (mux stream-id)
-  "Get or create a stream by ID"
-  (or (gethash stream-id (multiplexer-streams mux))
-      (setf (gethash stream-id (multiplexer-streams mux))
-            (make-http2-stream stream-id))))
+  "Find a stream. Forgotten or implicitly closed IDs never become idle again."
+  (bt2:with-lock-held ((multiplexer-lock mux))
+    (or (gethash stream-id (multiplexer-streams mux))
+        (let ((stream (make-http2-stream stream-id)))
+          (if (<= stream-id (if (oddp stream-id) (multiplexer-odd-high-water mux)
+                               (multiplexer-even-high-water mux)))
+              ;; A transient closed sentinel preserves protocol classification
+              ;; without retaining one object per historical stream ID.
+              (setf (stream-state stream) :closed)
+              (progn (multiplexer-note-id mux stream-id)
+                     (setf (gethash stream-id (multiplexer-streams mux)) stream)))
+          stream))))
 
 (defun multiplexer-new-stream (mux)
-  "Create a new stream with the next available ID"
-  (let ((id (multiplexer-next-stream-id mux)))
-    (incf (multiplexer-next-stream-id mux) 2)  ; Skip by 2 (odd/even)
-    (multiplexer-get-stream mux id)))
+  "Allocate and publish a new local stream atomically."
+  (bt2:with-lock-held ((multiplexer-lock mux))
+    (let* ((id (multiplexer-next-stream-id mux)) (stream (make-http2-stream id)))
+      (incf (multiplexer-next-stream-id mux) 2)
+      (multiplexer-note-id mux id)
+      (setf (gethash id (multiplexer-streams mux)) stream)
+      stream)))
 
 (defun multiplexer-close-stream (mux stream-id)
-  "Mark a stream as closed and invoke cleanup callback"
-  (let ((stream (gethash stream-id (multiplexer-streams mux))))
-    (when stream
-      ;; Invoke cleanup callback before closing
-      (stream-run-cleanup stream)
-      (setf (stream-state stream) :closed))))
+  "Mark closed, then run cleanup outside the multiplexer lock."
+  (let ((stream (bt2:with-lock-held ((multiplexer-lock mux))
+                  (let ((stream (gethash stream-id (multiplexer-streams mux))))
+                    (when stream (setf (stream-state stream) :closed)) stream))))
+    (when stream (stream-run-cleanup stream))))
+
+(defun multiplexer-forget-stream (mux stream-id)
+  "Release a closed stream after its application has finished with its data."
+  (bt2:with-lock-held ((multiplexer-lock mux))
+    (let ((stream (gethash stream-id (multiplexer-streams mux))))
+      (when stream
+        (unless (eq :closed (stream-state stream)) (error "Cannot retire an active HTTP2 stream"))
+        (remhash stream-id (multiplexer-streams mux))))))
 
 (defun multiplexer-active-streams (mux)
   "Return count of non-closed streams"
-  (loop for stream being the hash-values of (multiplexer-streams mux)
-        count (not (eql (stream-state stream) :closed))))
+  (bt2:with-lock-held ((multiplexer-lock mux))
+    (loop for stream being the hash-values of (multiplexer-streams mux)
+          count (not (eql (stream-state stream) :closed)))))
