@@ -92,6 +92,55 @@ permanently deaf."
            (is (eql :running (ag-grpc:server-state server))))
       (stop-test-server server thread))))
 
+(test per-ip-cap-sheds-extra-connections-from-one-source
+  "A single source address must not occupy more than MAX-CONNECTIONS-PER-IP
+connection slots at once, even with global capacity to spare.
+
+Without this, one peer (or any unauthenticated client during the pre-handshake
+window) can hold every global slot and lock all other peers out of the server.
+The cap leaves headroom for other sources; here the global pool has room (8) but
+the per-IP cap is 1, so a second connection from the same loopback source is shed
+while the first still holds its slot, and the listener keeps running."
+  (multiple-value-bind (server thread port)
+      (start-test-server :max-connections 8 :max-connections-per-ip 1)
+    (unwind-protect
+         (let ((hog (connect-raw port)))
+           (unwind-protect
+                (let ((over-limit (connect-raw port)))
+                  (unwind-protect
+                       (is-true (server-closed-connection-p over-limit :timeout 5)
+                                "a source at its per-IP cap must have the extra connection shed")
+                    (ignore-errors (usocket:socket-close over-limit))))
+             (ignore-errors (usocket:socket-close hog)))
+           (is (eql :running (ag-grpc:server-state server))))
+      (stop-test-server server thread))))
+
+(test per-ip-slot-accounting-reserves-caps-and-releases
+  "The per-IP reservation primitives account correctly: a source may hold up to
+the cap, the next reservation is refused, other sources are unaffected, releasing
+frees a slot, and with no cap configured reservations never fail. This is the
+logic the accept loop pairs with the connection lifetime to shed extra
+connections from one source while keeping headroom for the rest."
+  (let ((server (ag-grpc:make-grpc-server 0 :host "127.0.0.1"
+                                            :max-connections-per-ip 2)))
+    (is-true  (ag-grpc::server-try-reserve-ip-slot server "10.0.0.1"))
+    (is-true  (ag-grpc::server-try-reserve-ip-slot server "10.0.0.1"))
+    (is-false (ag-grpc::server-try-reserve-ip-slot server "10.0.0.1")
+              "a source at its cap is refused")
+    (is-true  (ag-grpc::server-try-reserve-ip-slot server "10.0.0.2")
+              "a different source keeps its own headroom")
+    (ag-grpc::server-release-ip-slot server "10.0.0.1")
+    (is-true  (ag-grpc::server-try-reserve-ip-slot server "10.0.0.1")
+              "releasing a slot lets the source reconnect")
+    (is-false (ag-grpc::server-try-reserve-ip-slot server "10.0.0.1")
+              "the freed slot is the only one returned")
+    ;; An unknown peer address is never accounted, and never refused.
+    (is-true (ag-grpc::server-try-reserve-ip-slot server nil))
+    ;; With no cap configured, every reservation is granted.
+    (let ((open (ag-grpc:make-grpc-server 0 :host "127.0.0.1")))
+      (dotimes (i 5)
+        (is-true (ag-grpc::server-try-reserve-ip-slot open "10.0.0.9"))))))
+
 (test idle-connections-are-reaped
   "A connection that goes silent must lose its slot, so capacity returns.
 
