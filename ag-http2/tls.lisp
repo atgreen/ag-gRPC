@@ -56,7 +56,8 @@ STREAM - the underlying TCP stream
 CERTIFICATE - path to PEM certificate file
 KEY - path to PEM private key file
 PASSWORD - optional password for encrypted key (currently unused by pure-tls)
-VERIFY - client certificate verification mode (T to require client certs)
+VERIFY - client certificate verification mode (T requires a cert; :OPTIONAL
+requests and verifies a cert when supplied)
 TRUST-STORE - path to CA certificate for verifying client certificates"
   (declare (ignore password))
   (ensure-tls-available)
@@ -66,7 +67,10 @@ TRUST-STORE - path to CA certificate for verifying client certificates"
          :alpn-protocols '("h2")
          (append
           (when verify
-            (list :verify (symbol-value (find-symbol "+VERIFY-REQUIRED+" :pure-tls))))
+            (list :verify (symbol-value
+                           (find-symbol (if (eq verify :optional)
+                                            "+VERIFY-PEER+" "+VERIFY-REQUIRED+")
+                                        :pure-tls))))
           (when trust-store
             (list :trust-store trust-store)))))
 

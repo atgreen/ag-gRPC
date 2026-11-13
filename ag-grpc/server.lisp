@@ -276,8 +276,8 @@ SERVER-STREAMING - T if server sends multiple messages"
   2. RST_STREAM second (client-initiated cancellation)
   This ensures deadline errors are reported even if RST_STREAM also present."
 
-  ;; First check deadline (highest precedence)
   (let ((cl-ctx (context-cancel-context ctx)))
+    ;; First check deadline (highest precedence)
     (when (cl-cancel:done-p cl-ctx)
       (let ((err (cl-cancel:err cl-ctx)))
         (when (typep err 'cl-cancel:deadline-exceeded)
@@ -286,30 +286,30 @@ SERVER-STREAMING - T if server sends multiple messages"
                  :message (format nil "~A" err)
                  :headers (context-request-headers ctx)
                  :trailers nil
-                 :cause err)))))
+                 :cause err))))
 
-  ;; Then check RST_STREAM (second precedence)
-  (let* ((stream-id (context-stream-id ctx))
-         (h2-stream (ag-http2:multiplexer-get-stream
-                     (ag-http2:connection-multiplexer (context-connection ctx))
-                     stream-id)))
-    (when (and h2-stream (ag-http2:stream-rst-stream-error h2-stream))
-      (error 'grpc-status-error
-             :code +grpc-status-cancelled+
-             :message "Cancelled by client (RST_STREAM)"
-             :headers (context-request-headers ctx)
-             :trailers nil)))
+    ;; Then check RST_STREAM (second precedence)
+    (let* ((stream-id (context-stream-id ctx))
+           (h2-stream (ag-http2:multiplexer-get-stream
+                       (ag-http2:connection-multiplexer (context-connection ctx))
+                       stream-id)))
+      (when (and h2-stream (ag-http2:stream-rst-stream-error h2-stream))
+        (error 'grpc-status-error
+               :code +grpc-status-cancelled+
+               :message "Cancelled by client (RST_STREAM)"
+               :headers (context-request-headers ctx)
+               :trailers nil)))
 
-  ;; Finally check other cl-cancel cancellation
-  (handler-case
-      (cl-cancel:check-cancellation cl-ctx)
-    (cl-cancel:cancelled (e)
-      (error 'grpc-status-error
-             :code +grpc-status-cancelled+
-             :message (format nil "~A" e)
-             :headers (context-request-headers ctx)
-             :trailers nil
-             :cause e))))
+    ;; Finally check other cl-cancel cancellation
+    (handler-case
+        (cl-cancel:check-cancellation cl-ctx)
+      (cl-cancel:cancelled (e)
+        (error 'grpc-status-error
+               :code +grpc-status-cancelled+
+               :message (format nil "~A" e)
+               :headers (context-request-headers ctx)
+               :trailers nil
+               :cause e)))))
 
 ;;;; ========================================================================
 ;;;; Server Call Stream (for streaming RPCs)
@@ -368,6 +368,24 @@ Use server-stop from another thread to shut down."
 If GRACEFUL is true, wait for active connections to finish."
   (declare (ignore graceful))  ; TODO: Implement graceful shutdown
   (setf (server-state server) :shutting-down)
+  ;; Closing a listening socket from another thread does not wake a thread
+  ;; already blocked in ACCEPT on every usocket backend.  A disposable local
+  ;; connection makes ACCEPT return; the state check in SERVER-ACCEPT-LOOP
+  ;; closes it without starting a connection worker.
+  (when (server-socket server)
+    (let ((wake-socket nil))
+      (unwind-protect
+           (ignore-errors
+             (setf wake-socket
+                   (usocket:socket-connect
+                    (cond
+                      ((string= (server-host server) "0.0.0.0") "127.0.0.1")
+                      ((string= (server-host server) "::") "::1")
+                      (t (server-host server)))
+                    (usocket:get-local-port (server-socket server))
+                    :element-type '(unsigned-byte 8))))
+        (when wake-socket
+          (ignore-errors (usocket:socket-close wake-socket))))))
   ;; Close listening socket to break accept loop
   (when (server-socket server)
     (usocket:socket-close (server-socket server))
@@ -415,39 +433,45 @@ granted here is released by SERVER-RELEASE-IP-SLOT when its connection ends."
           do (handler-case
                  (let ((client-socket (usocket:socket-accept (server-socket server))))
                    (when client-socket
-                     (if (bt:wait-on-semaphore sem :timeout +connection-slot-timeout+)
-                         (let ((ip (socket-peer-ip-key client-socket)))
-                           (if (server-try-reserve-ip-slot server ip)
-                               (bt:make-thread
-                                (lambda ()
-                                  (unwind-protect
-                                       (handler-case
-                                           (server-handle-connection server client-socket)
-                                         (error (e)
-                                           (format *error-output* "Connection error: ~A~%" e)))
-                                    (ignore-errors (usocket:socket-close client-socket))
-                                    (server-release-ip-slot server ip)
-                                    (bt:signal-semaphore sem)))
-                                :name "ag-grpc-conn")
-                               ;; This source already holds its per-IP cap. Shed
-                               ;; without spending a handler thread, and return the
-                               ;; global slot we just took, so one peer cannot fill
-                               ;; the pool during the unauthenticated opening.
-                               (progn
-                                 (format *error-output*
-                                         "Per-IP connection limit reached (~A) for ~A; rejecting connection~%"
-                                         (server-max-connections-per-ip server) ip)
-                                 (ignore-errors (usocket:socket-close client-socket))
-                                 (bt:signal-semaphore sem))))
-                         ;; At capacity. Shed this connection rather than block:
-                         ;; the wait above is the whole accept loop, so a peer
-                         ;; holding a slot would otherwise stop the server
-                         ;; serving anyone, permanently.
-                         (progn
-                           (format *error-output*
-                                   "Connection limit reached (~A); rejecting connection~%"
-                                   (server-max-connections server))
-                           (ignore-errors (usocket:socket-close client-socket))))))
+                     ;; A connection accepted as the server stops is closed
+                     ;; rather than handled (shutdown race from origin/main),
+                     ;; and a per-source-IP cap sheds one peer's excess before it
+                     ;; can fill the pool during the unauthenticated opening.
+                     (if (not (eql (server-state server) :running))
+                         (ignore-errors (usocket:socket-close client-socket))
+                         (if (bt:wait-on-semaphore sem :timeout +connection-slot-timeout+)
+                             (let ((ip (socket-peer-ip-key client-socket)))
+                               (if (server-try-reserve-ip-slot server ip)
+                                   (bt:make-thread
+                                    (lambda ()
+                                      (unwind-protect
+                                           (handler-case
+                                               (server-handle-connection server client-socket)
+                                             (error (e)
+                                               (format *error-output* "Connection error: ~A~%" e)))
+                                        (ignore-errors (usocket:socket-close client-socket))
+                                        (server-release-ip-slot server ip)
+                                        (bt:signal-semaphore sem)))
+                                    :name "ag-grpc-conn")
+                                   ;; This source already holds its per-IP cap. Shed
+                                   ;; without spending a handler thread, and return the
+                                   ;; global slot we just took, so one peer cannot fill
+                                   ;; the pool during the unauthenticated opening.
+                                   (progn
+                                     (format *error-output*
+                                             "Per-IP connection limit reached (~A) for ~A; rejecting connection~%"
+                                             (server-max-connections-per-ip server) ip)
+                                     (ignore-errors (usocket:socket-close client-socket))
+                                     (bt:signal-semaphore sem))))
+                             ;; At capacity. Shed this connection rather than block:
+                             ;; the wait above is the whole accept loop, so a peer
+                             ;; holding a slot would otherwise stop the server
+                             ;; serving anyone, permanently.
+                             (progn
+                               (format *error-output*
+                                       "Connection limit reached (~A); rejecting connection~%"
+                                       (server-max-connections server))
+                               (ignore-errors (usocket:socket-close client-socket)))))))
                (usocket:socket-error (e)
                  ;; Socket closed during shutdown
                  (declare (ignore e))
@@ -561,6 +585,14 @@ by a single NIL."
          (headers (ag-http2:stream-headers h2-stream))
          (method-path (rest (assoc :path headers)))
          (handler (server-get-handler server method-path)))
+    (when (eq :closed (ag-http2:stream-state h2-stream))
+      (return-from server-handle-headers))
+    ;; Even rejected calls need transport retirement. The full handler cleanup
+    ;; replaces this callback once application state has been registered.
+    (setf (ag-http2:stream-cleanup-callback h2-stream)
+          (lambda (stream)
+            (ag-http2::multiplexer-forget-stream
+             (ag-http2:connection-multiplexer conn) (ag-http2:stream-id stream))))
     (unless handler
       ;; No handler registered - send UNIMPLEMENTED
       (server-send-error conn stream-id +grpc-status-unimplemented+
@@ -614,12 +646,24 @@ by a single NIL."
                   (setf (context-cancel-fn ctx) nil)))
               ;; Remove stream state from connection maps
               (connection-remove-stream-state conn h2-stream)
-              ;; Remove message buffer if exists
-              (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
-                (remhash stream-id (ag-http2:connection-stream-buffers conn)))
+              ;; Wake a streaming handler blocked in STREAM-RECV before
+              ;; dropping the connection's reference to its message buffer.
+              ;; RST_STREAM and connection teardown both arrive here, and a
+              ;; bare REMHASH would otherwise strand the handler forever.
+              (let ((buffer
+                      (bt:with-lock-held
+                          ((ag-http2:connection-stream-state-lock conn))
+                        (prog1
+                            (gethash stream-id
+                                     (ag-http2:connection-stream-buffers conn))
+                          (remhash stream-id
+                                   (ag-http2:connection-stream-buffers conn))))))
+                (when buffer
+                  (buffer-close buffer)))
               ;; Decrement active streams counter
               (bt:with-lock-held ((ag-http2:connection-stream-state-lock conn))
-                (decf (ag-http2:connection-active-streams conn)))))
+                (decf (ag-http2:connection-active-streams conn)))
+              (ag-http2::multiplexer-forget-stream (ag-http2:connection-multiplexer conn) stream-id)))
       ;; For streaming RPCs, create message buffer and spawn handler thread.
       ;; For unary RPCs, wait for END_STREAM.
       (let ((is-streaming (or (handler-client-streaming-p handler)
@@ -669,15 +713,22 @@ by a single NIL."
                         (message (ag-proto:deserialize-from-bytes
                                   request-type msg-data)))
                    (buffer-push-message msg-buffer message))
-                 (let ((remaining (subseq byte-buffer consumed)))
-                   (setf (fill-pointer byte-buffer) 0)
-                   (loop for byte across remaining
-                         do (vector-push-extend byte byte-buffer))))))
+                 (let* ((remaining (subseq byte-buffer consumed))
+                        (length (length remaining)))
+                   ;; Keep only the incomplete next message, releasing the
+                   ;; capacity of already decoded streaming requests.
+                   (setf byte-buffer
+                         (make-array length :element-type '(unsigned-byte 8)
+                                            :initial-contents remaining
+                                            :adjustable t :fill-pointer length)
+                         (ag-http2:stream-data-buffer h2-stream) byte-buffer)))))
            (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
              (buffer-close msg-buffer)))
           (t
            (when (plusp (logand (ag-http2:frame-flags frame) ag-http2:+flag-end-stream+))
-             (let ((buffer (ag-http2:stream-data-buffer h2-stream)))
+             ;; Transfer the complete unary body out of the retained stream.
+             ;; Closed HTTP/2 records must not pin every historical request.
+             (let ((buffer (ag-http2:stream-consume-data h2-stream)))
                (server-dispatch-handler
                 server conn ctx handler buffer)))))))
 
