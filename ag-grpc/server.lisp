@@ -61,13 +61,30 @@ frame before it is closed. Connections with RPCs in flight are never idle.
 NIL disables reaping - and with it the only thing that returns a connection
 slot held by a peer that went away without closing its socket.")
    (connection-semaphore :initform nil :accessor server-connection-semaphore
-                         :documentation "Semaphore limiting concurrent connections"))
+                         :documentation "Semaphore limiting concurrent connections")
+   (max-connections-per-ip :initarg :max-connections-per-ip
+                           :accessor server-max-connections-per-ip
+                           :initform nil
+                           :documentation "Maximum concurrent connections from a
+single peer address, or NIL for no per-source limit. The global MAX-CONNECTIONS
+semaphore alone lets one peer fill every slot during the pre-handshake window --
+including the unauthenticated opening -- and lock everyone else out. A per-source
+cap reserves headroom for other peers; the peer identity is not known until after
+the handshake, so the source IP is the only lever available this early.")
+   (per-ip-connection-counts :initform (make-hash-table :test #'equal)
+                             :accessor server-per-ip-connection-counts
+                             :documentation "Live connection count keyed by peer
+address string; only populated when MAX-CONNECTIONS-PER-IP is set.")
+   (per-ip-connection-lock :initform (bt:make-lock "grpc-per-ip-connections")
+                           :reader server-per-ip-connection-lock
+                           :documentation "Lock protecting PER-IP-CONNECTION-COUNTS."))
   (:documentation "gRPC server"))
 
 (defun make-grpc-server (port &key (host "0.0.0.0") tls tls-certificate tls-key
                                    tls-ca-certificate (tls-verify-client nil)
                                    (max-concurrent-streams 100)
                                    (max-connections 128)
+                                   (max-connections-per-ip nil)
                                    (connection-idle-timeout +default-connection-idle-timeout+))
   "Create a new gRPC server.
 PORT - Port to listen on
@@ -77,6 +94,9 @@ TLS-CERTIFICATE - Path to TLS certificate file
 TLS-KEY - Path to TLS private key file
 TLS-CA-CERTIFICATE - Path to CA certificate for verifying client certificates (mTLS)
 TLS-VERIFY-CLIENT - When true, require and verify client certificates
+MAX-CONNECTIONS-PER-IP - Maximum concurrent connections from one peer address, or
+NIL (the default) for no per-source limit; caps a single source well below
+MAX-CONNECTIONS so it cannot monopolise the pool during the pre-handshake window
 CONNECTION-IDLE-TIMEOUT - Seconds of silence before an idle connection is
 closed, or NIL to keep connections until the peer closes them"
   (when (and tls (not (and tls-certificate tls-key)))
@@ -91,6 +111,7 @@ closed, or NIL to keep connections until the peer closes them"
                  :tls-verify-client tls-verify-client
                  :max-concurrent-streams max-concurrent-streams
                  :max-connections max-connections
+                 :max-connections-per-ip max-connections-per-ip
                  :connection-idle-timeout connection-idle-timeout))
 
 (defun server-add-interceptor (server interceptor)
@@ -359,6 +380,34 @@ If GRACEFUL is true, wait for active connections to finish."
     (setf (server-connections server) nil))
   (setf (server-state server) :stopped))
 
+(defun socket-peer-ip-key (socket)
+  "A stable key for SOCKET's peer address, or NIL if it cannot be read. Port is
+excluded on purpose: the cap is per source host, across all its ports."
+  (ignore-errors (princ-to-string (usocket:get-peer-address socket))))
+
+(defun server-try-reserve-ip-slot (server ip)
+  "Reserve a per-source connection slot for IP, returning T when granted.
+Returns T with no accounting when no per-IP cap is configured or IP is unknown,
+and NIL when IP already holds MAX-CONNECTIONS-PER-IP live connections. A slot
+granted here is released by SERVER-RELEASE-IP-SLOT when its connection ends."
+  (let ((cap (server-max-connections-per-ip server)))
+    (if (and cap ip)
+        (bt:with-lock-held ((server-per-ip-connection-lock server))
+          (let ((n (gethash ip (server-per-ip-connection-counts server) 0)))
+            (when (< n cap)
+              (setf (gethash ip (server-per-ip-connection-counts server)) (1+ n))
+              t)))
+        t)))
+
+(defun server-release-ip-slot (server ip)
+  "Release a per-source slot previously reserved by SERVER-TRY-RESERVE-IP-SLOT."
+  (when (and (server-max-connections-per-ip server) ip)
+    (bt:with-lock-held ((server-per-ip-connection-lock server))
+      (let ((n (gethash ip (server-per-ip-connection-counts server) 0)))
+        (if (<= n 1)
+            (remhash ip (server-per-ip-connection-counts server))
+            (setf (gethash ip (server-per-ip-connection-counts server)) (1- n)))))))
+
 (defun server-accept-loop (server)
   "Accept and handle incoming connections"
   (let ((sem (server-connection-semaphore server)))
@@ -367,16 +416,29 @@ If GRACEFUL is true, wait for active connections to finish."
                  (let ((client-socket (usocket:socket-accept (server-socket server))))
                    (when client-socket
                      (if (bt:wait-on-semaphore sem :timeout +connection-slot-timeout+)
-                         (bt:make-thread
-                          (lambda ()
-                            (unwind-protect
-                                 (handler-case
-                                     (server-handle-connection server client-socket)
-                                   (error (e)
-                                     (format *error-output* "Connection error: ~A~%" e)))
-                              (ignore-errors (usocket:socket-close client-socket))
-                              (bt:signal-semaphore sem)))
-                          :name "ag-grpc-conn")
+                         (let ((ip (socket-peer-ip-key client-socket)))
+                           (if (server-try-reserve-ip-slot server ip)
+                               (bt:make-thread
+                                (lambda ()
+                                  (unwind-protect
+                                       (handler-case
+                                           (server-handle-connection server client-socket)
+                                         (error (e)
+                                           (format *error-output* "Connection error: ~A~%" e)))
+                                    (ignore-errors (usocket:socket-close client-socket))
+                                    (server-release-ip-slot server ip)
+                                    (bt:signal-semaphore sem)))
+                                :name "ag-grpc-conn")
+                               ;; This source already holds its per-IP cap. Shed
+                               ;; without spending a handler thread, and return the
+                               ;; global slot we just took, so one peer cannot fill
+                               ;; the pool during the unauthenticated opening.
+                               (progn
+                                 (format *error-output*
+                                         "Per-IP connection limit reached (~A) for ~A; rejecting connection~%"
+                                         (server-max-connections-per-ip server) ip)
+                                 (ignore-errors (usocket:socket-close client-socket))
+                                 (bt:signal-semaphore sem))))
                          ;; At capacity. Shed this connection rather than block:
                          ;; the wait above is the whole accept loop, so a peer
                          ;; holding a slot would otherwise stop the server
