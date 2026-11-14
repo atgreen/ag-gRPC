@@ -163,14 +163,22 @@ peers retire the server permanently."
                (ignore-errors (ag-http2:connection-close conn)))))
       (stop-test-server server thread))))
 
-(test connection-close-releases-socket-when-goaway-is-blocked
-  "CONNECTION-CLOSE must close the socket even when it cannot send GOAWAY.
+(test connection-close-defers-socket-disposal-until-writer-releases
+  "CONNECTION-CLOSE must return promptly even when it cannot send GOAWAY, and must
+not dispose the stream buffers while a writer still holds the write lock.
 
 Regression (cave-ear): connection-close took the write lock to send GOAWAY
 before closing the socket, with no timeout and no unwind-protect. A peer
 stalled mid-write held that lock, so close blocked and the file descriptor
 leaked - which is how the client side of a wedged connection kept its half of
-the socket open forever, hiding the failure from the server."
+the socket open forever, hiding the failure from the server.
+
+Regression (GitHub #29): the leak fix then closed the socket unconditionally in
+the unwind cleanup, disposing (and recycling) the SBCL fd-stream buffers while a
+writer still owned them under the write lock. Disposal must instead wait for the
+writer to release the lock; close still returns promptly, finishing the disposal
+on a helper thread. SOCKET-SHUTDOWN (which wakes blocked I/O) still happens at
+once, but it leaves the Lisp stream open - only SOCKET-CLOSE disposes it."
   (multiple-value-bind (server thread port)
       (start-test-server :max-connections 8)
     (unwind-protect
@@ -193,11 +201,113 @@ the socket open forever, hiding the failure from the server."
                                  :name "connection-closer")))
                     (is-true (wait-for-thread-exit closer :timeout 5)
                              "connection-close must not block on the write lock")
-                    (is-false (open-stream-p (usocket:socket-stream socket))
-                              "connection-close must close the socket")))
+                    ;; The writer still holds the lock, so disposal is deferred:
+                    ;; the buffers it owns must not have been recycled yet.
+                    (is-true (open-stream-p (usocket:socket-stream socket))
+                             "close must not dispose buffers a writer still holds"))
+                  ;; Release the writer; the deferred disposer then closes the socket.
+                  (bt:signal-semaphore release)
+                  (wait-for-thread-exit hog :timeout 5)
+                  (is-true (loop repeat 500
+                                 thereis (not (open-stream-p (usocket:socket-stream socket)))
+                                 do (sleep 0.01))
+                           "socket must be disposed once the writer releases the lock"))
              (bt:signal-semaphore release)
              (wait-for-thread-exit hog :timeout 5)))
       (stop-test-server server thread))))
+
+(test connection-close-defers-disposal-while-a-reader-is-active
+  "Regression (GitHub #30): CONNECTION-READ-FRAME owns the input buffer while it
+reads. A concurrent CONNECTION-CLOSE shuts the socket down to wake the reader,
+but must not dispose (recycle) the input buffer until the reader has let go -
+otherwise SBCL can hand the reader's fd-stream buffer back to the allocator
+mid-read. Close therefore defers the final SOCKET-CLOSE until active input drains.
+
+A probe stands in for READ-FRAME: it parks a reader inside CONNECTION-READ-FRAME,
+holding input ownership, until the test releases it - modeling ownership across a
+partial read without needing real malformed bytes."
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :element-type '(unsigned-byte 8)))
+         (socket (usocket:socket-connect "127.0.0.1" (usocket:get-local-port listener)
+                                         :element-type '(unsigned-byte 8)))
+         (peer (usocket:socket-accept listener))
+         (conn (make-instance 'ag-http2:http2-connection
+                              :socket socket :stream (usocket:socket-stream socket)
+                              :client-p t))
+         (reader-parked (bt:make-semaphore))
+         (reader-release (bt:make-semaphore))
+         (original (symbol-function 'ag-http2:read-frame)))
+    (setf (ag-http2:connection-multiplexer conn)
+          (ag-http2::make-stream-multiplexer :client-p t)
+          (ag-http2:connection-state conn) :open)
+    (unwind-protect
+         (progn
+           ;; Park any reader that enters READ-FRAME, holding input ownership.
+           (setf (symbol-function 'ag-http2:read-frame)
+                 (lambda (&rest args)
+                   (declare (ignore args))
+                   (bt:signal-semaphore reader-parked)
+                   (bt:wait-on-semaphore reader-release :timeout 30)
+                   nil))
+           (let ((reader (bt:make-thread
+                          (lambda () (ignore-errors (ag-http2:connection-read-frame conn)))
+                          :name "parked-reader")))
+             (is-true (bt:wait-on-semaphore reader-parked :timeout 5)
+                      "test setup: reader should be parked inside read-frame")
+             (is (= 1 (ag-http2::connection-active-input conn))
+                 "an in-flight read must register as active input")
+             (let ((closer (bt:make-thread
+                            (lambda () (ignore-errors (ag-http2:connection-close conn)))
+                            :name "connection-closer")))
+               (is-true (wait-for-thread-exit closer :timeout 5)
+                        "connection-close must not block on an active reader")
+               ;; The reader still owns the input buffer, so disposal is deferred.
+               (is-true (open-stream-p (usocket:socket-stream socket))
+                        "close must not dispose the buffer an active reader holds"))
+             ;; Release the reader; input drains and the deferred disposer runs.
+             (bt:signal-semaphore reader-release)
+             (is-true (wait-for-thread-exit reader :timeout 5))
+             (is-true (loop repeat 500
+                            thereis (not (open-stream-p (usocket:socket-stream socket)))
+                            do (sleep 0.01))
+                      "socket must be disposed once the reader releases the buffer")))
+      (setf (symbol-function 'ag-http2:read-frame) original)
+      (bt:signal-semaphore reader-release)
+      (ignore-errors (usocket:socket-close socket))
+      (ignore-errors (usocket:socket-close peer))
+      (ignore-errors (usocket:socket-close listener)))))
+
+(test connection-close-is-idempotent
+  "CONNECTION-CLOSE claims socket finalization exactly once, so repeated and
+concurrent closes are safe no-ops after the first. The accept-loop worker and
+SERVER-HANDLE-CONNECTION both close the same connection (GitHub #30), relying on
+this; a second close must not re-dispose or signal on an already-closed socket."
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :element-type '(unsigned-byte 8)))
+         (socket (usocket:socket-connect "127.0.0.1" (usocket:get-local-port listener)
+                                         :element-type '(unsigned-byte 8)))
+         (peer (usocket:socket-accept listener))
+         (conn (make-instance 'ag-http2:http2-connection
+                              :socket socket :stream (usocket:socket-stream socket)
+                              :client-p t)))
+    (setf (ag-http2:connection-multiplexer conn)
+          (ag-http2::make-stream-multiplexer :client-p t)
+          (ag-http2:connection-state conn) :open)
+    (unwind-protect
+         (progn
+           (ag-http2:connection-close conn)
+           (is (eql :closed (ag-http2:connection-state conn)))
+           (is-true (loop repeat 500
+                          thereis (not (open-stream-p (usocket:socket-stream socket)))
+                          do (sleep 0.01))
+                    "first close must dispose the socket")
+           ;; Second and concurrent closes must be harmless.
+           (finishes (ag-http2:connection-close conn))
+           (let ((again (bt:make-thread
+                         (lambda () (ignore-errors (ag-http2:connection-close conn)))
+                         :name "repeat-closer")))
+             (is-true (wait-for-thread-exit again :timeout 5)))
+           (is (eql :closed (ag-http2:connection-state conn))))
+      (ignore-errors (usocket:socket-close peer))
+      (ignore-errors (usocket:socket-close listener)))))
 
 (test handshaked-connection-that-goes-silent-is-reaped
   "The production shape of the leak: a peer completes the handshake, uses the
