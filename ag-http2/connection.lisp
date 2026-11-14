@@ -98,7 +98,23 @@ gRPC default max receive message size).")
    (reader-thread-active-p :initform nil
                            :accessor connection-reader-thread-active-p
                            :documentation "When T, a dedicated reader thread processes incoming frames.
-When NIL, connection-send-data reads frames directly when flow control blocks."))
+When NIL, connection-send-data reads frames directly when flow control blocks.")
+   ;; Close ownership and input lifetime (GitHub #29, #30). Closing the socket
+   ;; recycles the SBCL fd-stream buffers, so it must wait until every thread
+   ;; that still owns a buffer has let go: a frame writer holding WRITE-LOCK, or
+   ;; a reader part-way through READ-FRAME. CLOSE-LOCK serializes the one-time
+   ;; ownership claim and the ACTIVE-INPUT accounting; INPUT-DRAINED is signaled
+   ;; when the last reader leaves after close has been claimed.
+   (close-lock :initform (bt2:make-lock :name "h2-close-lock")
+               :accessor connection-close-lock
+               :documentation "Serializes close-ownership claims and input accounting")
+   (close-owned-p :initform nil :accessor connection-close-owned-p
+                  :documentation "T once a caller has claimed socket finalization")
+   (active-input :initform 0 :accessor connection-active-input
+                 :documentation "Count of in-flight reads that own the input buffer")
+   (input-drained :initform (bt2:make-semaphore :name "h2-input-drained")
+                  :accessor connection-input-drained
+                  :documentation "Signaled when ACTIVE-INPUT reaches zero after close is claimed"))
   (:documentation "HTTP/2 connection"))
 
 (defmethod initialize-instance :after ((conn http2-connection) &key)
@@ -169,31 +185,101 @@ CA-CERTIFICATE - Path to CA certificate for verifying client certificates."
     conn))
 
 ;;;; ========================================================================
+;;;; Close ownership and input lifetime (GitHub #29, #30)
+;;;; ========================================================================
+;;;;
+;;;; CONNECTION-CLOSE shuts the socket down promptly to wake blocked I/O, but it
+;;;; must not dispose (close, and so recycle) the fd-stream buffers while another
+;;;; thread still owns them. These helpers let a reader register that it holds the
+;;;; input buffer, and let close claim finalization exactly once and wait for the
+;;;; readers and the frame writer to leave before the final SOCKET-CLOSE.
+
+(defun connection-claim-input (conn)
+  "Register an active read, returning T on success. Returns NIL once close has
+been claimed or the connection is closed, so the caller must not touch the
+stream."
+  (bt2:with-lock-held ((connection-close-lock conn))
+    (unless (or (connection-close-owned-p conn)
+                (eql (connection-state conn) :closed))
+      (incf (connection-active-input conn))
+      t)))
+
+(defun connection-release-input (conn)
+  "Retire an active read. Once close owns the connection, hold its state :closed
+so a handshake completing here cannot reopen it; and when this was the last
+reader a waiting disposer is told the input buffer is free."
+  (let ((notify nil))
+    (bt2:with-lock-held ((connection-close-lock conn))
+      (when (connection-close-owned-p conn)
+        (setf (connection-state conn) :closed))
+      (when (zerop (decf (connection-active-input conn)))
+        (setf notify (connection-close-owned-p conn))))
+    (when notify
+      (bt2:signal-semaphore (connection-input-drained conn)))))
+
+(defmacro with-connection-input ((conn) &body body)
+  "Run BODY as an owner of CONN's input buffer. If close has already been claimed,
+signal END-OF-FILE instead of touching the stream. The claim is always balanced
+by a release, even if BODY is unwound by an asynchronous interrupt."
+  (let ((c (gensym "CONN")) (claimed (gensym "CLAIMED")))
+    `(let ((,c ,conn) (,claimed nil))
+       #+sbcl
+       (sb-sys:without-interrupts
+         (unwind-protect
+              (progn
+                (setf ,claimed (connection-claim-input ,c))
+                (unless ,claimed
+                  (error 'end-of-file :stream (connection-stream ,c)))
+                (sb-sys:with-local-interrupts ,@body))
+           (when ,claimed (connection-release-input ,c))))
+       #-sbcl
+       (unwind-protect
+            (progn
+              (setf ,claimed (connection-claim-input ,c))
+              (unless ,claimed
+                (error 'end-of-file :stream (connection-stream ,c)))
+              ,@body)
+         (when ,claimed (connection-release-input ,c))))))
+
+;;;; ========================================================================
 ;;;; Connection Handshake
 ;;;; ========================================================================
 
 (defun connection-handshake (conn)
-  "Perform the HTTP/2 connection handshake (client-side)"
-  (let ((stream (connection-stream conn)))
-    (when (connection-client-p conn)
-      ;; Client sends preface
-      (write-sequence +connection-preface+ stream)
-      ;; Send initial SETTINGS
-      (write-frame (make-settings-frame :settings (connection-local-settings conn))
-                   stream)
-      (force-output stream)
-      ;; Read server's SETTINGS
-      (let ((frame (read-frame stream)))
-        (when (typep frame 'settings-frame)
-          (apply-remote-settings conn (settings-frame-settings frame))
-          ;; Send SETTINGS ACK
-          (write-frame (make-settings-frame :ack t) stream)
-          (force-output stream))))
-    (setf (connection-state conn) :open)))
+  "Perform the HTTP/2 connection handshake (client-side).
+Reads and writes the stream directly, so it claims input ownership and holds the
+write lock: a concurrent CONNECTION-CLOSE then defers buffer disposal, and this
+handshake's final :OPEN cannot reopen a connection close has already taken."
+  (with-connection-input (conn)
+    (bt2:with-lock-held ((connection-write-lock conn))
+      (let ((stream (connection-stream conn)))
+        (when (connection-client-p conn)
+          ;; Client sends preface
+          (write-sequence +connection-preface+ stream)
+          ;; Send initial SETTINGS
+          (write-frame (make-settings-frame :settings (connection-local-settings conn))
+                       stream)
+          (force-output stream)
+          ;; Read server's SETTINGS
+          (let ((frame (read-frame stream)))
+            (when (typep frame 'settings-frame)
+              (apply-remote-settings conn (settings-frame-settings frame))
+              ;; Send SETTINGS ACK
+              (write-frame (make-settings-frame :ack t) stream)
+              (force-output stream))))
+        (setf (connection-state conn) :open)))))
 
 (defun server-connection-handshake (conn)
   "Perform the HTTP/2 connection handshake (server-side).
-Reads and validates client preface, exchanges SETTINGS frames."
+Reads and validates client preface, exchanges SETTINGS frames.
+Reads and writes the stream directly, so it claims input ownership and holds the
+write lock: a concurrent CONNECTION-CLOSE then defers buffer disposal, and this
+handshake's final :OPEN cannot reopen a connection close has already taken."
+  (with-connection-input (conn)
+    (bt2:with-lock-held ((connection-write-lock conn))
+      (server-connection-handshake-body conn))))
+
+(defun server-connection-handshake-body (conn)
   (let ((stream (connection-stream conn)))
     ;; Read and validate the client connection preface (24 bytes)
     (let ((preface (make-array 24 :element-type '(unsigned-byte 8))))
@@ -364,13 +450,14 @@ ERROR-CODE is an HTTP/2 error code (e.g., +error-cancel+ for client cancellation
 
 (defun connection-read-frame (conn)
   "Read and process a frame from the connection"
-  (let ((frame (read-frame (connection-stream conn)
-                           (or (rest (assoc +settings-max-frame-size+
-                                            (connection-local-settings conn)))
-                               +default-max-frame-size+))))
-    (when frame
-      (process-frame conn frame))
-    frame))
+  (with-connection-input (conn)
+    (let ((frame (read-frame (connection-stream conn)
+                             (or (rest (assoc +settings-max-frame-size+
+                                              (connection-local-settings conn)))
+                                 +default-max-frame-size+))))
+      (when frame
+        (process-frame conn frame))
+      frame)))
 
 (defun process-frame (conn frame)
   "Process a received frame"
@@ -542,43 +629,109 @@ out cleanly."
     #-sbcl
     (ignore-errors (clear-output stream))))
 
-(defun connection-close (conn &key (error-code +error-no-error+) debug-data)
-  "Close the HTTP/2 connection gracefully and invoke cleanup callbacks.
-The farewell GOAWAY is best effort: a peer that has stopped reading can leave
-another thread holding the write lock indefinitely, and a close that waits for
-it leaks the socket - along with, on a server, the connection slot behind it.
-Releasing the file descriptor is the part that must always happen."
-  (unwind-protect
-       (progn
-         ;; Invoke cleanup callbacks for all streams before closing
-         (let* ((mux (connection-multiplexer conn))
-                (streams (bt2:with-lock-held ((multiplexer-lock mux))
-                           (loop for stream being the hash-values of (multiplexer-streams mux) collect stream))))
-           (dolist (stream streams)
-             (setf (stream-state stream) :closed)
-             (stream-run-cleanup stream)))
-         ;; Set closing state BEFORE broadcast so woken senders see it
-         (when (eql (connection-state conn) :open)
-           (setf (connection-state conn) :closing)
-           ;; Wake any senders blocked on flow control so they can exit
-           (bt2:condition-broadcast (connection-flow-control-cv conn))
-           (ignore-errors
-            (bt2:with-lock-held ((connection-write-lock conn)
-                                 :timeout +goaway-lock-timeout+)
-              ;; Drop any frame bytes a thread unwound mid-write left behind, so
-              ;; the GOAWAY flush does not resend an already-delivered frame.
-              (discard-unsent-output conn)
-              (write-frame (make-goaway-frame (connection-last-stream-id conn)
-                                              error-code
-                                              debug-data)
-                           (connection-stream conn))
-              (force-output (connection-stream conn))))))
-    (setf (connection-state conn) :closed)
-    ;; Closing a descriptor in another thread may leave a reader blocked.
-    ;; Shut down both directions first so streaming RPCs can exit promptly.
+(defun connection-claim-close (conn)
+  "Give exactly one caller ownership of socket finalization, returning T for it.
+Returns NIL for a repeat or post-close caller, so CONNECTION-CLOSE is idempotent."
+  (bt2:with-lock-held ((connection-close-lock conn))
+    (unless (or (connection-close-owned-p conn)
+                (eql (connection-state conn) :closed))
+      (setf (connection-close-owned-p conn) t))))
+
+(defun connection-await-input-drain (conn)
+  "Block until no reader owns CONN's input buffer. Called only after close is
+claimed, so no new readers can appear and the count only falls to zero."
+  (loop
+    (when (zerop (bt2:with-lock-held ((connection-close-lock conn))
+                   (connection-active-input conn)))
+      (return))
+    (bt2:wait-on-semaphore (connection-input-drained conn))))
+
+(defun connection-dispose-socket-after-writer (conn)
+  "Dispose CONN's socket - which recycles the fd-stream buffers - only once no
+reader owns the input buffer and the frame writer lock is free (GitHub #29, #30).
+The shutdown in CONNECTION-FINISH-CLOSE has already woken blocked operations, so
+the owners we wait for exit promptly. When ownership cannot be taken at once the
+disposal moves to a helper thread, so close never blocks on a stalled peer.
+Never wait for input while holding the write lock: processing an inbound frame
+may itself need that lock, which would deadlock."
+  (let ((lock (connection-write-lock conn)))
+    (flet ((dispose ()
+             (ignore-errors (discard-unsent-output conn))
+             (ignore-errors (usocket:socket-close (connection-socket conn)))))
+      (if (and (zerop (bt2:with-lock-held ((connection-close-lock conn))
+                        (connection-active-input conn)))
+               (ignore-errors (bt2:acquire-lock lock :wait nil)))
+          (unwind-protect (dispose) (bt2:release-lock lock))
+          (bt2:make-thread
+           (lambda ()
+             (connection-await-input-drain conn)
+             (bt2:with-lock-held (lock) (dispose)))
+           :name "h2-deferred-socket-close")))))
+
+(defun connection-finish-close (conn)
+  "Unconditional finalization for the close owner: run stream callbacks, wake
+flow-control waiters, shut the socket down to release blocked I/O, then dispose
+it once its buffers are unowned. Always runs - even if the GOAWAY body unwound -
+so the file descriptor is never leaked."
+  (let ((streams (when (slot-boundp conn 'multiplexer)
+                   (let ((mux (connection-multiplexer conn)))
+                     (bt2:with-lock-held ((multiplexer-lock mux))
+                       (loop for stream being the hash-values of (multiplexer-streams mux)
+                             collect stream))))))
+    (dolist (stream streams)
+      (setf (stream-state stream) :closed)
+      (ignore-errors (stream-run-cleanup stream))))
+  (setf (connection-state conn) :closed)
+  ;; Wake any senders blocked on flow control so they can exit.
+  (bt2:condition-broadcast (connection-flow-control-cv conn))
+  (when (connection-socket conn)
+    ;; Closing a descriptor in another thread may leave a reader blocked. Shut
+    ;; down both directions first so streaming RPCs can exit promptly, then
+    ;; dispose the buffers once their owners have let go.
     (ignore-errors
       (usocket:socket-shutdown (connection-socket conn) :io))
-    (ignore-errors (usocket:socket-close (connection-socket conn)))))
+    (connection-dispose-socket-after-writer conn)))
+
+(defun connection-close-body (conn error-code debug-data)
+  "Best-effort graceful close: send a farewell GOAWAY under the write lock. The
+GOAWAY is best effort - a peer that has stopped reading can leave another thread
+holding the write lock, and a close that waited for it would leak the socket -
+so this is bounded, and CONNECTION-FINISH-CLOSE guarantees the teardown."
+  ;; Set closing state BEFORE broadcast so woken senders see it.
+  (when (eql (connection-state conn) :open)
+    (setf (connection-state conn) :closing)
+    (bt2:condition-broadcast (connection-flow-control-cv conn))
+    (ignore-errors
+     (bt2:with-lock-held ((connection-write-lock conn)
+                          :timeout +goaway-lock-timeout+)
+       ;; Drop any frame bytes a thread unwound mid-write left behind, so the
+       ;; GOAWAY flush does not resend an already-delivered frame.
+       (discard-unsent-output conn)
+       (write-frame (make-goaway-frame (connection-last-stream-id conn)
+                                       error-code
+                                       debug-data)
+                    (connection-stream conn))
+       (force-output (connection-stream conn))))))
+
+(defun connection-close (conn &key (error-code +error-no-error+) debug-data)
+  "Close the HTTP/2 connection and invoke cleanup callbacks. Finalizes exactly
+once, retaining the stream buffers until active readers and the frame writer
+release them (GitHub #29, #30). Shutdown wakes socket and flow-control waiters
+immediately; the final buffer disposal may complete asynchronously when a reader
+or writer is still active, so this never blocks on a stalled peer."
+  (let ((owned nil))
+    #+sbcl
+    (sb-sys:without-interrupts
+      (unwind-protect
+           (when (setf owned (connection-claim-close conn))
+             (sb-sys:with-local-interrupts
+               (connection-close-body conn error-code debug-data)))
+        (when owned (connection-finish-close conn))))
+    #-sbcl
+    (unwind-protect
+         (when (setf owned (connection-claim-close conn))
+           (connection-close-body conn error-code debug-data))
+      (when owned (connection-finish-close conn)))))
 
 (defun connection-new-stream (conn)
   "Create a new stream on this connection"

@@ -444,12 +444,14 @@ granted here is released by SERVER-RELEASE-IP-SLOT when its connection ends."
                                (if (server-try-reserve-ip-slot server ip)
                                    (bt:make-thread
                                     (lambda ()
+                                      ;; SERVER-HANDLE-CONNECTION owns CLIENT-SOCKET's
+                                      ;; disposal on every path (GitHub #30); closing it
+                                      ;; here too would bypass ordered buffer teardown.
                                       (unwind-protect
                                            (handler-case
                                                (server-handle-connection server client-socket)
                                              (error (e)
                                                (format *error-output* "Connection error: ~A~%" e)))
-                                        (ignore-errors (usocket:socket-close client-socket))
                                         (server-release-ip-slot server ip)
                                         (bt:signal-semaphore sem)))
                                     :name "ag-grpc-conn")
@@ -511,37 +513,49 @@ by a single NIL."
                     (t (return nil)))))))))
 
 (defun server-handle-connection (server client-socket)
-  "Handle a single client connection"
+  "Handle a single client connection. Owns CLIENT-SOCKET's disposal on every exit
+path: once an HTTP/2 connection wraps the socket, teardown goes through
+CONNECTION-CLOSE so the stream buffers are retired in order (GitHub #30); before
+that, the raw socket is closed directly. The accept-loop worker must therefore
+not close the socket itself."
   ;; Don't start the (possibly TLS) handshake until the peer actually speaks.
   ;; The handshake read has no deadline of its own, so a peer that connects and
   ;; says nothing would own this thread - and its connection slot - for good.
   (unless (server-wait-for-frame server client-socket nil)
+    (ignore-errors (usocket:socket-close client-socket))
     (return-from server-handle-connection))
-  (let* ((conn (ag-http2:make-server-connection client-socket
-                                                 :tls (server-tls server)
-                                                 :certificate (server-tls-certificate server)
-                                                 :key (server-tls-key server)
-                                                 :verify (server-tls-verify-client server)
-                                                 :ca-certificate (server-tls-ca-certificate server)))
-         (peer-addr (format nil "~A:~A"
-                            (usocket:get-peer-address client-socket)
-                            (usocket:get-peer-port client-socket))))
-    ;; Perform HTTP/2 handshake
-    (ag-http2:server-connection-handshake conn)
-    ;; Server connection loop reads frames on this thread; handler threads
-    ;; send data. Mark reader thread active so flow control uses CV-wait.
-    (setf (ag-http2:connection-reader-thread-active-p conn) t)
-    ;; Track connection
-    (bt:with-lock-held ((server-connections-lock server))
-      (push conn (server-connections server)))
+  (let ((conn nil))
     (unwind-protect
-         (server-connection-loop server conn peer-addr)
-      ;; Cleanup
-      (bt:with-lock-held ((server-connections-lock server))
-        (setf (server-connections server)
-              (remove conn (server-connections server))))
-      (ignore-errors
-        (ag-http2:connection-close conn)))))
+         (let ((peer-addr nil))
+           (setf conn (ag-http2:make-server-connection client-socket
+                                                       :tls (server-tls server)
+                                                       :certificate (server-tls-certificate server)
+                                                       :key (server-tls-key server)
+                                                       :verify (server-tls-verify-client server)
+                                                       :ca-certificate (server-tls-ca-certificate server)))
+           (setf peer-addr (format nil "~A:~A"
+                                   (usocket:get-peer-address client-socket)
+                                   (usocket:get-peer-port client-socket)))
+           ;; Perform HTTP/2 handshake
+           (ag-http2:server-connection-handshake conn)
+           ;; Server connection loop reads frames on this thread; handler threads
+           ;; send data. Mark reader thread active so flow control uses CV-wait.
+           (setf (ag-http2:connection-reader-thread-active-p conn) t)
+           ;; Track connection
+           (bt:with-lock-held ((server-connections-lock server))
+             (push conn (server-connections server)))
+           (unwind-protect
+                (server-connection-loop server conn peer-addr)
+             (bt:with-lock-held ((server-connections-lock server))
+               (setf (server-connections server)
+                     (remove conn (server-connections server))))))
+      (if conn
+          ;; CONNECTION-CLOSE owns the socket: it shuts it down now and disposes
+          ;; the buffers once readers and the frame writer have released them.
+          (ignore-errors (ag-http2:connection-close conn))
+          ;; No connection was created (handshake never reached, or
+          ;; MAKE-SERVER-CONNECTION failed), so release the raw socket here.
+          (ignore-errors (usocket:socket-close client-socket))))))
 
 (defun server-connection-loop (server conn peer-addr)
   "Process frames for a connection until closed"
