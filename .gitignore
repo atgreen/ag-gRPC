@@ -33,3 +33,10 @@ C-RESPONSE.md
 IMPLEMENTATION-LOG.md
 INTEGRATION-TEST-PLAN.md
 CONCURRENCY-FIXES-SUMMARY.md
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
